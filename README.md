@@ -1,6 +1,6 @@
-# ApkMod-Script for Termux
+# K-K-0_rev-nced_p-tch
 
-This is a script to select a version of a specific messenger app from apkmirror, merge it, and patch it using `revanced-build-script`.
+This is a script to select a version of a specific messenger app from apkmirror, merge it automatically, and patch it using `revanced-build-script`.
 
 ## Prerequisites (최초 1회 설정)
 
@@ -23,21 +23,25 @@ Before running the script, you must prepare the following tools and repositories
     cd ~/revanced-build-script
     pip install -r requirements.txt
     ```
+    
+4.  **(Optional) Prepare APKEditor**
+    The script will try to download `APKEditor-1.4.5.jar` to `/storage/emulated/0/Download` if it's missing. You can also download it manually.
 
 ## Usage (사용법)
 
-1.  Clone this repository:
+1.  **Clone this repository:**
     ```bash
-    # /storage/emulated/0/Download 폴더 또는 원하는 위치로 이동
+    # Go to your preferred directory, e.g., Download
     cd /storage/emulated/0/Download
     
-    # 'ApkMod-Script'라는 이름으로 폴더가 생성됩니다.
-    git clone [여기에-이-저장소의-Git-URL] ApkMod-Script
+    git clone [https://github.com/anycall6779/K-K-0_rev-nced_p-tch.git](https://github.com/anycall6779/K-K-0_rev-nced_p-tch.git)
     ```
 
-2.  Run the script:
+2.  **Run the script:**
     ```bash
-    cd ApkMod-Script
+    cd K-K-0_rev-nced_p-tch
     chmod +x patch.sh
     ./patch.sh
     ```
+3.  Follow the on-screen instructions to select a version.
+4.  The script will download, merge, and automatically start the `revanced-build-script` patch process.
