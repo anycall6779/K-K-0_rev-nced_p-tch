@@ -73,16 +73,16 @@ choose_version() {
     local PAGE_CONTENTS
     PAGE_CONTENTS=$("${CURL[@]}" -A "$USER_AGENT" "https://www.apkmirror.com/uploads/?appcategory=$APKMIRROR_APP_NAME")
 
-    # --- [START] JQ SYNTAX FIX 5 ---
-    # `pup`가 반환하는 JSON의 HTML 구조가 변경됨에 따라, 
-    # 버전 텍스트를 찾는 경로를 .children[0].children[1].children[0].children[0].text로 수정합니다.
+    # --- [START] JQ SYNTAX FIX 7 ---
+    # `null` 오류 해결을 위해 복잡한 children 경로 대신,
+    # `pup`가 제공하는 최상위 'text' 필드를 사용합니다.
     readarray -t VERSIONS_LIST < <(
         pup -c 'div.listWidget a.fontBlack json{}' <<< "$PAGE_CONTENTS" |
             jq -rc '
             .[] | # pup가 반환하는 배열의 각 항목을 순회
             {
-                # HTML 구조 변경에 따른 새 경로
-                "version": .children[0].children[1].children[0].children[0].text,
+                # .children[...] 대신 최상위 .text 사용
+                "version": .text,
                 "url": .href
             } |
             # dialog (Tag, Item) 형식으로 출력
@@ -90,7 +90,7 @@ choose_version() {
             (.url | @json)
         ' | head -n 30 # 상위 15개 버전 (15 * 2줄 = 30줄)
     )
-    # --- [END] JQ SYNTAX FIX 5 ---
+    # --- [END] JQ SYNTAX FIX 7 ---
 
     if [ ${#VERSIONS_LIST[@]} -eq 0 ]; then
         echo -e "${RED}[ERROR] Failed to fetch version list. (Scraper may be broken)${NC}"
@@ -108,7 +108,7 @@ choose_version() {
         return 1 # User pressed 'Cancel'
     fi
     
-    # 사용자가 null을 선택했는지 확인 (jq가 null을 반환했을 경우)
+    # 사용자가 null을 선택했는지 확인
     if [ -z "$SELECTED_URL_JSON" ] || [ "$SELECTED_URL_JSON" == "null" ]; then
         echo -e "${RED}[ERROR] Invalid selection. (Selected item was null)${NC}"
         return 1
