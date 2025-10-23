@@ -73,26 +73,28 @@ choose_version() {
     local PAGE_CONTENTS
     PAGE_CONTENTS=$("${CURL[@]}" -A "$USER_AGENT" "https://www.apkmirror.com/uploads/?appcategory=$APKMIRROR_APP_NAME")
 
-    # --- [START] JQ SYNTAX FIX ---
-    # `jq`가 dialog의 (Tag, Item) 쌍을 올바르게 생성하도록 수정합니다.
-    # 각 쌍은 별도의 줄에 출력되어야 합니다.
+    # --- [START] PUP/JQ FIX ---
+    # APKMirror HTML 변경에 대응하여 'pup' 선택자와 'jq' 필터를 수정합니다.
+    # 기존: pup -c 'div.listWidget div:not([class]) json{}'
+    # 새 선택자: pup -c 'div.listWidget a.fontBlack json{}'
     readarray -t VERSIONS_LIST < <(
-        pup -c 'div.listWidget div:not([class]) json{}' <<< "$PAGE_CONTENTS" |
+        pup -c 'div.listWidget a.fontBlack json{}' <<< "$PAGE_CONTENTS" |
             jq -rc '
-            .[].children as $CHILDREN |
+            .[]. |
             {
-                version: $CHILDREN[1].children[0].children[1].text,
-                url: $CHILDREN[0].children[0].children[1].children[0].children[0].children[0].href
+                # HTML 구조 변경으로 버전 텍스트 경로 수정
+                "version": .children[0].children[1].children[0].text, 
+                "url": .href
             } |
-            # 출력: 1. 버전 텍스트 (Tag), 2. URL (Item)
+            # dialog (Tag, Item) 형식으로 출력
             .version,
             (.url | @json)
         ' | head -n 30 # 상위 15개 버전 (15 * 2줄 = 30줄)
     )
-    # --- [END] JQ SYNTAX FIX ---
+    # --- [END] PUP/JQ FIX ---
 
     if [ ${#VERSIONS_LIST[@]} -eq 0 ]; then
-        echo -e "${RED}[ERROR] Failed to fetch version list.${NC}"
+        echo -e "${RED}[ERROR] Failed to fetch version list. (Scraper may be broken)${NC}"
         exit 1
     fi
 
