@@ -1,22 +1,12 @@
 #!/bin/bash
 #
-# KakaoTalk Auto-Merge & Patch Script
-# v3.0 - Revancify Architecture
+# KakaoTalk Auto-Merge & Patch Script v3.1
+# Fixed APKMirror scraping logic based on Revancify architecture
 #
-set -euo pipefail
+set -e
 
 # ==================== CONFIGURATION ====================
-APP_NAME="KakaoTalk"
-PKG_NAME="com.kakao.talk"
-APKMIRROR_ORG="kakao-corp"
-APKMIRROR_APP="kakaotalk"
-
-BASE_DIR="/storage/emulated/0/Download"
-PATCH_SCRIPT_DIR="$HOME/revanced-build-script"
-MERGED_APK_PATH="$HOME/Downloads/KakaoTalk.apk"
-EDITOR_JAR="$BASE_DIR/APKEditor-1.4.5.jar"
-
-# Colors
+# Color Codes
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -24,401 +14,424 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
+# App Info
+APP_NAME="KakaoTalk"
+PKG_NAME="com.kakao.talk"
+APKMIRROR_APP_NAME="kakaotalk"
+
+# Paths
+BASE_DIR="/storage/emulated/0/Download"
+PATCH_SCRIPT_DIR="$HOME/revanced-build-script"
+MERGED_APK_PATH="$HOME/Downloads/KakaoTalk.apk"
+EDITOR_JAR="$BASE_DIR/APKEditor-1.4.5.jar"
+
 # Environment
-USER_AGENT="Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
-ARCH=$(getprop ro.product.cpu.abi 2>/dev/null || echo "arm64-v8a")
-DPI=$(getprop ro.sf.lcd_density 2>/dev/null || echo "480")
-LOCALE=$(getprop persist.sys.locale 2>/dev/null | sed 's/-.*//g' || echo "ko")
-[ "$ARCH" = "arm64-v8a" ] && ARCH_APK="arm64-v8a" || ARCH_APK="armeabi-v7a"
+USER_AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+ARCH=$(getprop ro.product.cpu.abi)
+DPI=$(getprop ro.sf.lcd_density)
+LOCALE=$(getprop persist.sys.locale | sed 's/-.*//g')
+
+# Convert arch for APK naming
+case "$ARCH" in
+    arm64-v8a) ARCH_APK="arm64_v8a" ;;
+    armeabi-v7a) ARCH_APK="armeabi_v7a" ;;
+    *) ARCH_APK="${ARCH//-/_}" ;;
+esac
 
 # Tools
-DIALOG=(dialog --keep-tite --no-shadow --no-collapse --visit-items --ok-label "선택" --cancel-label "취소")
-CURL=(curl -sL --fail-early --connect-timeout 5 --max-time 10 -H 'Cache-Control: no-cache' -A "$USER_AGENT")
+DIALOG=(dialog --keep-tite --no-shadow --backtitle "KakaoTalk Auto-Merge & Patch Script v3.1 - Revancify Architecture")
+CURL=(curl -sL --fail-early --connect-timeout 5 --max-time 10)
 WGET=(wget -qc --show-progress --user-agent="$USER_AGENT")
 
-# ==================== UTILITY FUNCTIONS ====================
-log() { echo -e "${BLUE}[$(date '+%H:%M:%S')]${NC} $*"; }
-success() { echo -e "${GREEN}[$(date '+%H:%M:%S')]${NC} $*"; }
-warning() { echo -e "${YELLOW}[$(date '+%H:%M:%S')]${NC} $*"; }
-error() { echo -e "${RED}[$(date '+%H:%M:%S')]${NC} $*"; }
+# ==================== FUNCTIONS ====================
 
-notify() {
-    dialog --no-shadow --"$1"box "$2" 12 50
+print_header() {
+    clear
+    echo -e "${CYAN}"
+    echo "╔════════════════════════════════════════╗"
+    echo "║  KakaoTalk Auto-Merge & Patch Script  ║"
+    echo "║    v3.1 - Revancify Architecture      ║"
+    echo "╚════════════════════════════════════════╝"
+    echo -e "${NC}"
+    echo -e "[$(date +%H:%M:%S)] Arch: ${CYAN}$ARCH${NC}, DPI: ${CYAN}$DPI${NC}, Locale: ${CYAN}$LOCALE${NC}"
+}
+
+log_info() {
+    echo -e "[$(date +%H:%M:%S)] ${BLUE}$1${NC}"
+}
+
+log_success() {
+    echo -e "[$(date +%H:%M:%S)] ${GREEN}$1${NC}"
+}
+
+log_error() {
+    echo -e "[$(date +%H:%M:%S)] ${RED}$1${NC}"
+}
+
+log_warning() {
+    echo -e "[$(date +%H:%M:%S)] ${YELLOW}$1${NC}"
 }
 
 cleanup() {
-    log "Cleaning up..."
-    rm -f "$BASE_DIR"/*.apkm "$BASE_DIR"/debug_*.html 2>/dev/null || true
-    rm -rf "$BASE_DIR/mod_temp_merge" 2>/dev/null || true
-    tput cnorm
+    log_info "Cleaning up..."
+    rm -rf "$BASE_DIR/mod_temp_merge" 2>/dev/null
+    rm -f "$BASE_DIR"/*.apkm.tmp 2>/dev/null
 }
 
-trap cleanup EXIT
-
-internet() {
-    if ! ping -c 1 8.8.8.8 &> /dev/null; then
-        notify msg "No Internet Connection!\n\nConnect and try again."
+check_internet() {
+    if ! ping -c 1 -W 2 google.com &>/dev/null; then
+        log_error "No internet connection"
         return 1
     fi
 }
 
-# ==================== DEPENDENCY CHECK ====================
 check_dependencies() {
-    log "Checking dependencies..."
+    log_info "Checking dependencies..."
     local MISSING=0
     
     for cmd in dialog curl pup jq wget unzip java python git; do
-        if ! command -v "$cmd" &> /dev/null; then
-            error "'$cmd' not found. Install: pkg install $cmd"
+        if ! command -v $cmd &>/dev/null; then
+            log_error "'$cmd' not found. Install with: pkg install $cmd"
             MISSING=1
         fi
     done
     
     if [ ! -d "$PATCH_SCRIPT_DIR" ]; then
-        error "Patch script not found: $PATCH_SCRIPT_DIR"
-        warning "Clone: git clone https://git.naijun.dev/ReVanced/revanced-build-script.git ~/revanced-build-script"
+        log_error "Patch script not found: $PATCH_SCRIPT_DIR"
+        echo "    Clone with: git clone https://git.naijun.dev/ReVanced/revanced-build-script.git ~/"
         MISSING=1
     fi
     
     if [ ! -f "$EDITOR_JAR" ]; then
-        warning "Downloading APKEditor..."
-        "${WGET[@]}" -O "$EDITOR_JAR" "https://github.com/REAndroid/APKEditor/releases/download/V1.4.5/APKEditor-1.4.5.jar" || {
-            error "Failed to download APKEditor";
-            MISSING=1;
-        }
+        log_warning "APKEditor not found, downloading..."
+        mkdir -p "$BASE_DIR"
+        if "${WGET[@]}" -O "$EDITOR_JAR" "https://github.com/REAndroid/APKEditor/releases/download/V1.4.5/APKEditor-1.4.5.jar"; then
+            log_success "APKEditor downloaded"
+        else
+            log_error "Failed to download APKEditor"
+            MISSING=1
+        fi
     fi
     
     [ $MISSING -eq 1 ] && exit 1
-    mkdir -p "$HOME/Downloads" "$BASE_DIR"
-    success "Dependencies OK"
+    log_success "Dependencies OK"
+    mkdir -p "$HOME/Downloads"
 }
 
-# ==================== APKMIRROR FUNCTIONS (from Revancify) ====================
-fetch_app_info() {
-    log "Fetching app info from APKMirror API..."
-    
-    local RESPONSE
-    if ! RESPONSE=$("${CURL[@]}" \
-        'https://www.apkmirror.com/wp-json/apkm/v1/app_exists/' \
-        -H 'Accept: application/json' \
-        -H 'Content-Type: application/json' \
-        -H 'Authorization: Basic YXBpLXRvb2xib3gtZm9yLWdvb2dsZS1wbGF5OkNiVVcgQVVMZyBNRVJXIHU4M3IgS0s0SCBEbmJL' \
-        -d "{\"pnames\":[\"$PKG_NAME\"]}" 2>/dev/null); then
-        error "API request failed"
-        return 1
-    fi
-    
-    # Parse response
-    APKMIRROR_APP_NAME=$(echo "$RESPONSE" | \
-        jq -r ".data[] | select(.pname == \"$PKG_NAME\") | .app.link" 2>/dev/null | \
-        sed 's|.*\/||; s|\/$||')
-    
-    if [ -z "$APKMIRROR_APP_NAME" ]; then
-        error "App not found in APKMirror"
-        return 1
-    fi
-    
-    success "Found: $APKMIRROR_APP_NAME"
-}
+# ==================== APKMIRROR SCRAPING ====================
 
-fetch_versions() {
-    log "Fetching available versions..."
+fetch_versions_list() {
+    log_info "Fetching app info from APKMirror API..."
     
-    local PAGE_URL="https://www.apkmirror.com/apk/$APKMIRROR_ORG/$APKMIRROR_APP_NAME/"
-    local PAGE_CONTENT
+    check_internet || return 1
     
-    if ! PAGE_CONTENT=$("${CURL[@]}" "$PAGE_URL" 2>/dev/null); then
-        error "Failed to fetch versions page"
+    local PAGE_CONTENTS VERSIONS_TEXT URLS_LIST
+    
+    # Fetch main page
+    PAGE_CONTENTS=$("${CURL[@]}" -A "$USER_AGENT" "https://www.apkmirror.com/uploads/?appcategory=$APKMIRROR_APP_NAME" 2>/dev/null)
+    
+    if [ -z "$PAGE_CONTENTS" ]; then
+        log_error "Failed to fetch page from APKMirror"
         return 1
     fi
     
-    # Extract version links
-    readarray -t VERSION_LINKS < <(
-        echo "$PAGE_CONTENT" | \
-        pup 'div.listWidget div.appRow h5.appRowTitle a attr{href}' 2>/dev/null | \
-        grep -E "/$APKMIRROR_APP_NAME.*-release/" | \
-        head -n 15
+    # Extract version numbers using pup
+    VERSIONS_TEXT=$(pup -c 'div.listWidget div.appRow h5.appRowTitle' <<< "$PAGE_CONTENTS" 2>/dev/null | pup 'text{}' 2>/dev/null)
+    
+    # Extract URLs using pup
+    URLS_LIST=$(pup -c 'div.listWidget div.appRow > a' <<< "$PAGE_CONTENTS" 2>/dev/null | pup 'attr{href}' 2>/dev/null)
+    
+    if [ -z "$VERSIONS_TEXT" ] || [ -z "$URLS_LIST" ]; then
+        log_error "App not found in APKMirror"
+        log_warning "This could be due to:"
+        echo "    - APKMirror HTML structure changed"
+        echo "    - Network/cloudflare protection"
+        echo "    - Incorrect app name: $APKMIRROR_APP_NAME"
+        return 1
+    fi
+    
+    # Combine version text and URLs for dialog menu
+    readarray -t VERSIONS_LIST < <(
+        paste <(echo "$VERSIONS_TEXT") <(echo "$URLS_LIST") |
+        awk -F'\t' '{
+            # Clean version text
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1);
+            print $1;
+            print $2;
+        }' |
+        head -n 40  # Top 20 versions (20 * 2 lines)
     )
     
-    if [ "${#VERSION_LINKS[@]}" -eq 0 ]; then
-        error "No versions found"
+    if [ ${#VERSIONS_LIST[@]} -eq 0 ]; then
+        log_error "No versions found"
         return 1
     fi
     
-    success "Found ${#VERSION_LINKS[@]} versions"
+    log_success "Found ${#VERSIONS_LIST[@]} versions"
 }
 
 choose_version() {
-    local -a MENU_ITEMS=()
+    fetch_versions_list || return 1
     
-    for link in "${VERSION_LINKS[@]}"; do
-        # Extract version from URL
-        local version=$(echo "$link" | \
-            sed -n 's|.*/'"$APKMIRROR_APP_NAME"'.*-\([0-9]\+\(-[0-9]\+\)*\)-release.*|\1|p' | \
-            tr '-' '.')
-        
-        [ -z "$version" ] && continue
-        
-        MENU_ITEMS+=("$version" "$link")
-    done
-    
-    if [ "${#MENU_ITEMS[@]}" -eq 0 ]; then
-        error "Failed to parse versions"
-        return 1
-    fi
-    
-    local SELECTED_VERSION
-    if ! SELECTED_VERSION=$(
+    local SELECTED_URL
+    if ! SELECTED_URL=$(
         "${DIALOG[@]}" \
-            --title "| $APP_NAME Version Selection |" \
-            --menu "Select version to patch:" 20 60 15 \
-            "${MENU_ITEMS[@]}" \
-            2>&1 > /dev/tty
+            --title '| Version Selection |' \
+            --ok-label 'Select' \
+            --cancel-label 'Exit' \
+            --menu "Navigate with [↑] [↓], Select with [SPACE]" 20 60 12 \
+            "${VERSIONS_LIST[@]}" \
+            2>&1 >/dev/tty
     ); then
-        warning "Cancelled"
+        log_info "Version selection cancelled"
         return 1
     fi
     
-    # Find corresponding URL
-    for ((i=0; i<"${#MENU_ITEMS[@]}"; i+=2)); do
-        if [ "${MENU_ITEMS[$i]}" = "$SELECTED_VERSION" ]; then
-            APP_VER="$SELECTED_VERSION"
-            APP_URL="https://www.apkmirror.com${MENU_ITEMS[$((i+1))]}"
-            break
-        fi
-    done
+    if [ -z "$SELECTED_URL" ] || [ "$SELECTED_URL" == "null" ]; then
+        log_error "Invalid version selected"
+        return 1
+    fi
     
-    success "Selected: v$APP_VER"
+    APP_DL_URL="https://www.apkmirror.com$SELECTED_URL"
+    APP_VER=$(basename "$SELECTED_URL" | sed 's/kakaotalk-//; s/-release//; s/-/./g')
+    
+    log_success "Selected version: $APP_VER"
 }
 
-# ==================== DOWNLOAD FUNCTIONS ====================
-download_apk() {
-    log "Analyzing download page..."
+scrape_download_link() {
+    log_info "Scraping download link (Step 1/3)..."
     
-    local PAGE1 DOWNLOAD_LINK VARIANT_LINK
+    local PAGE1 PAGE2 PAGE3 URL1 URL2 URL3
+    local CANONICAL_URL APP_FORMAT VARIANT_INFO
     
-    # Step 1: Get version page
-    if ! PAGE1=$("${CURL[@]}" "$APP_URL" 2>/dev/null); then
-        error "Failed to fetch version page"
-        return 1
+    # Step 1: Get variant page
+    PAGE1=$("${CURL[@]}" -A "$USER_AGENT" "$APP_DL_URL" 2>/dev/null)
+    
+    CANONICAL_URL=$(pup -p --charset utf-8 'link[rel="canonical"] attr{href}' <<< "$PAGE1" 2>/dev/null)
+    
+    if grep -q "apk-download" <<< "$CANONICAL_URL"; then
+        URL1="${CANONICAL_URL/https:\/\/www.apkmirror.com\//}"
+    else
+        # Parse variant table for BUNDLE (APKM)
+        readarray -t VARIANT_INFO < <(
+            pup -p --charset utf-8 'div.variants-table json{}' <<< "$PAGE1" 2>/dev/null |
+                jq -r \
+                    --arg ARCH "$ARCH" \
+                    --arg DPI "$DPI" '
+                    [
+                        .[].children[1:][].children |
+                        if (.[1].text | test("universal|noarch|\($ARCH)")) and
+                            (
+                                .[3].text | test("nodpi") or
+                                (
+                                    capture("(?<low>\\d+)-(?<high>\\d+)dpi") |
+                                    (($DPI | tonumber) <= (.high | tonumber)) and 
+                                    (($DPI | tonumber) >= (.low | tonumber))
+                                )
+                            )
+                        then
+                            .[0].children
+                        else
+                            empty
+                        end
+                    ] |
+                    if length != 0 then
+                        [
+                            if any(.[]; .[1].text == "BUNDLE") then
+                                .[] | if (.[1].text == "BUNDLE") then [.[1].text, .[0].href] else empty end
+                            else
+                                .[] | [.[1].text, .[0].href]
+                            end
+                        ][-1][]
+                    else
+                        empty
+                    end
+                ' 2>/dev/null
+        )
+        
+        if [ "${#VARIANT_INFO[@]}" -eq 0 ]; then
+            log_error "No compatible APK/BUNDLE found for $ARCH"
+            return 1
+        fi
+        
+        APP_FORMAT="${VARIANT_INFO[0]}"
+        URL1="${VARIANT_INFO[1]}"
     fi
     
-    # Find BUNDLE download link
-    VARIANT_LINK=$(echo "$PAGE1" | \
-        pup 'div.table-row a.accent_color attr{href}' 2>/dev/null | \
-        grep -i 'bundle\|universal' | \
-        head -n 1)
-    
-    if [ -z "$VARIANT_LINK" ]; then
-        # Fallback: get first variant
-        VARIANT_LINK=$(echo "$PAGE1" | \
-            pup 'div.variants-table a attr{href}' 2>/dev/null | \
-            head -n 1)
-    fi
-    
-    if [ -z "$VARIANT_LINK" ]; then
-        error "No variant found"
-        return 1
-    fi
-    
-    log "Found variant: $(basename "$VARIANT_LINK")"
+    log_info "Scraping download link (Step 2/3)..."
     
     # Step 2: Get download button page
-    local PAGE2 DOWNLOAD_BTN
-    if ! PAGE2=$("${CURL[@]}" "https://www.apkmirror.com$VARIANT_LINK" 2>/dev/null); then
-        error "Failed to fetch download page"
+    PAGE2=$("${CURL[@]}" -A "$USER_AGENT" "https://www.apkmirror.com$URL1" 2>/dev/null)
+    URL2=$(pup -p --charset utf-8 'a.downloadButton attr{href}' <<< "$PAGE2" 2>/dev/null | tail -n 1)
+    
+    if [ -z "$URL2" ]; then
+        log_error "Download button not found"
         return 1
     fi
     
-    DOWNLOAD_BTN=$(echo "$PAGE2" | \
-        pup 'a.downloadButton attr{href}' 2>/dev/null | \
-        head -n 1)
-    
-    if [ -z "$DOWNLOAD_BTN" ]; then
-        error "Download button not found"
-        return 1
-    fi
+    log_info "Scraping download link (Step 3/3)..."
     
     # Step 3: Get final download link
-    local PAGE3 FINAL_LINK
-    if ! PAGE3=$("${CURL[@]}" "https://www.apkmirror.com$DOWNLOAD_BTN" 2>/dev/null); then
-        error "Failed to fetch final page"
+    PAGE3=$("${CURL[@]}" -A "$USER_AGENT" "https://www.apkmirror.com$URL2" 2>/dev/null)
+    URL3=$(pup -p --charset UTF-8 'a:contains("here") attr{href}' <<< "$PAGE3" 2>/dev/null | head -n 1)
+    
+    if [ -z "$URL3" ]; then
+        log_error "Final download link not found"
         return 1
     fi
     
-    FINAL_LINK=$(echo "$PAGE3" | \
-        pup 'a[rel="nofollow"] attr{href}' 2>/dev/null | \
-        grep -E '\.(apkm|apk)' | \
-        head -n 1)
-    
-    if [ -z "$FINAL_LINK" ]; then
-        error "Final link not found"
-        return 1
-    fi
-    
-    # Handle absolute/relative URLs
-    if [[ "$FINAL_LINK" =~ ^http ]]; then
-        DOWNLOAD_URL="$FINAL_LINK"
-    else
-        DOWNLOAD_URL="https://www.apkmirror.com$FINAL_LINK"
-    fi
-    
-    success "Download link acquired"
-    
-    # Download file
-    local OUTPUT_FILE="$BASE_DIR/${APP_NAME}-${APP_VER}.apkm"
-    log "Downloading..."
-    
-    if ! "${WGET[@]}" "$DOWNLOAD_URL" -O "$OUTPUT_FILE" 2>&1 | \
-        stdbuf -o0 grep -oP '\d+(?=%)' | \
-        "${DIALOG[@]}" --gauge "Downloading $APP_NAME v$APP_VER" 10 60 0; then
-        error "Download failed"
-        return 1
-    fi
-    tput civis
-    
-    if [ ! -f "$OUTPUT_FILE" ]; then
-        error "File not found after download"
-        return 1
-    fi
-    
-    local FILE_SIZE=$(du -h "$OUTPUT_FILE" | cut -f1)
-    success "Downloaded: $FILE_SIZE"
-    
-    APKM_FILE="$OUTPUT_FILE"
+    APP_URL="https://www.apkmirror.com$URL3"
+    log_success "Download link acquired"
 }
 
-# ==================== MERGE FUNCTIONS ====================
-merge_apk() {
-    log "Extracting APKM bundle..."
+# ==================== DOWNLOAD & MERGE ====================
+
+download_apkm() {
+    local APKM_FILE="$BASE_DIR/${APP_NAME}-${APP_VER}.apkm"
+    
+    log_info "Downloading $APP_NAME v$APP_VER..."
+    
+    rm -f "$APKM_FILE"
+    
+    if ! "${WGET[@]}" "$APP_URL" -O "$APKM_FILE" 2>&1 | grep --line-buffered -o '[0-9]*%' | while read -r percent; do
+        echo "XXX"
+        echo "${percent%\%}"
+        echo "Downloading: $percent"
+        echo "XXX"
+    done | "${DIALOG[@]}" --gauge "Downloading $APP_NAME v$APP_VER from APKMirror..." 8 60 0; then
+        log_error "Download failed"
+        return 1
+    fi
+    
+    if [ ! -f "$APKM_FILE" ]; then
+        log_error "Downloaded file not found"
+        return 1
+    fi
+    
+    log_success "Download complete: $(du -h "$APKM_FILE" | cut -f1)"
+    
+    export APKM_FILE
+}
+
+merge_apkm() {
+    log_info "Merging APKM to APK..."
     
     local TEMP_DIR="$BASE_DIR/mod_temp_merge"
     rm -rf "$TEMP_DIR"
     mkdir -p "$TEMP_DIR"
     
-    # Extract all APKs
-    if ! unzip -qqo "$APKM_FILE" -d "$TEMP_DIR" 2>/dev/null; then
-        error "Failed to extract APKM"
-        return 1
-    fi
+    # Extract split APKs
+    log_info "Extracting split APKs..."
+    unzip -qqo "$APKM_FILE" \
+        "base.apk" \
+        "split_config.${ARCH_APK}.apk" \
+        "split_config.${LOCALE}.apk" \
+        split_config.*dpi.apk \
+        -d "$TEMP_DIR" 2>/dev/null
     
-    # Verify base.apk exists
+    # Fallback: extract everything if minimal extraction failed
     if [ ! -f "$TEMP_DIR/base.apk" ]; then
-        error "base.apk not found in bundle"
-        ls -lh "$TEMP_DIR"
-        return 1
+        log_warning "Minimal extraction failed, extracting all..."
+        unzip -qqo "$APKM_FILE" -d "$TEMP_DIR" 2>/dev/null
     fi
-    
-    local SPLIT_COUNT=$(find "$TEMP_DIR" -name "*.apk" | wc -l)
-    log "Found $SPLIT_COUNT APK files to merge"
     
     # Merge with APKEditor
-    log "Merging with APKEditor..."
+    log_info "Running APKEditor merge..."
     rm -f "$MERGED_APK_PATH"
     
-    {
-        java -jar "$EDITOR_JAR" m \
-            -i "$TEMP_DIR" \
-            -o "$MERGED_APK_PATH" 2>&1 | \
-            grep -v "WARNING" || true
-    } | "${DIALOG[@]}" --programbox "Merging APK splits..." 20 80
-    tput civis
-    
-    if [ ! -f "$MERGED_APK_PATH" ]; then
-        error "Merge failed"
+    if ! java -jar "$EDITOR_JAR" m -i "$TEMP_DIR" -o "$MERGED_APK_PATH" 2>&1 | grep --line-buffered -E 'Merging|Writing' | while read -r line; do
+        echo "XXX"
+        echo "50"
+        echo "$line"
+        echo "XXX"
+    done | "${DIALOG[@]}" --gauge "Merging with APKEditor..." 8 60 0; then
+        log_error "APKEditor merge failed"
+        cleanup
         return 1
     fi
     
-    local MERGED_SIZE=$(du -h "$MERGED_APK_PATH" | cut -f1)
-    success "Merged APK: $MERGED_SIZE"
+    if [ ! -f "$MERGED_APK_PATH" ]; then
+        log_error "Merged APK not found"
+        cleanup
+        return 1
+    fi
+    
+    log_success "Merge complete: $(du -h "$MERGED_APK_PATH" | cut -f1)"
     
     # Cleanup
     rm -f "$APKM_FILE"
     rm -rf "$TEMP_DIR"
 }
 
-# ==================== PATCH FUNCTIONS ====================
-patch_apk() {
-    log "Starting ReVanced patch process..."
+# ==================== PATCH ====================
+
+run_patch_script() {
+    log_success "Starting patch process..."
+    echo ""
     
-    if [ ! -f "$PATCH_SCRIPT_DIR/build.py" ]; then
-        error "build.py not found in $PATCH_SCRIPT_DIR"
+    cd "$PATCH_SCRIPT_DIR" || {
+        log_error "Cannot access patch script directory"
         return 1
-    fi
+    }
     
-    cd "$PATCH_SCRIPT_DIR" || return 1
+    log_info "Running revanced-build-script..."
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     
-    log "Running build.py..."
-    log "  APK: $MERGED_APK_PATH"
-    log "  Package: $PKG_NAME"
-    
-    if ! python build.py \
+    if ! python3 build.py \
         --apk "$MERGED_APK_PATH" \
         --package "$PKG_NAME" \
         --include-universal \
-        --run 2>&1 | \
-        "${DIALOG[@]}" --programbox "Patching $APP_NAME v$APP_VER" 30 100; then
-        error "Patching failed"
+        --run; then
+        log_error "Patch script failed"
         return 1
     fi
-    tput civis
     
-    success "Patch completed!"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log_success "Patch complete!"
+    log_info "Output directory: $PATCH_SCRIPT_DIR/out/"
 }
 
-# ==================== MAIN WORKFLOW ====================
+# ==================== MAIN ====================
+
 main() {
-    clear
-    echo -e "${GREEN}╔════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║  KakaoTalk Auto-Merge & Patch Script  ║${NC}"
-    echo -e "${GREEN}║    v3.0 - Revancify Architecture      ║${NC}"
-    echo -e "${GREEN}╚════════════════════════════════════════╝${NC}"
-    echo ""
+    print_header
     
-    log "Arch: $ARCH, DPI: $DPI, Locale: $LOCALE"
-    echo ""
-    
-    # Check dependencies
+    # Dependency check
     check_dependencies || exit 1
     
-    # Check internet
-    internet || exit 1
-    
-    # Fetch app info from APKMirror API
-    fetch_app_info || exit 1
-    
-    # Fetch available versions
-    fetch_versions || exit 1
-    
-    # Let user choose version
-    choose_version || exit 0
-    
-    # Download APK
-    download_apk || exit 1
-    
-    # Merge APKM
-    merge_apk || exit 1
-    
-    # Patch APK
-    patch_apk || exit 1
-    
-    # Done
-    echo ""
-    echo -e "${GREEN}╔════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║         ALL TASKS COMPLETE! ✓         ║${NC}"
-    echo -e "${GREEN}╚════════════════════════════════════════╝${NC}"
-    echo ""
-    success "Patched APK location:"
-    echo -e "${CYAN}  → $PATCH_SCRIPT_DIR/out/${NC}"
-    echo ""
-    
-    # Offer to install
-    if "${DIALOG[@]}" \
-        --title "| Installation |" \
-        --yesno "Patch completed!\n\nOpen patched APK?" 10 40; then
-        termux-open "$PATCH_SCRIPT_DIR/out/"*.apk 2>/dev/null || true
+    # Version selection
+    if ! choose_version; then
+        log_info "Operation cancelled by user"
+        exit 0
     fi
+    
+    # Download link scraping
+    scrape_download_link || exit 1
+    
+    # Download APKM
+    download_apkm || exit 1
+    
+    # Merge to APK
+    merge_apkm || exit 1
+    
+    # Run patch
+    run_patch_script || exit 1
+    
+    # Success
+    echo ""
+    log_success "═══════════════════════════════════════"
+    log_success "  ALL TASKS COMPLETED SUCCESSFULLY!   "
+    log_success "═══════════════════════════════════════"
+    echo ""
+    echo "Patched APK location:"
+    echo "  ${CYAN}$PATCH_SCRIPT_DIR/out/${NC}"
+    echo ""
+    
+    cleanup
 }
+
+# Error handler
+trap cleanup EXIT INT TERM
 
 # Run
 main "$@"
