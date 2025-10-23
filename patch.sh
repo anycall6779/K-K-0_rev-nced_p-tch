@@ -1,6 +1,7 @@
 #!/bin/bash
 #
-# APKM 파일 경로 수동 입력 + 자동 병합 + 자동 패치 스크립트
+# 스마트 파일 핸들러 + 자동 병합/패치 스크립트
+# (.apk 또는 .apkm을 입력받아 자동 처리)
 #
 set -e # 오류 발생 시 즉시 중지
 
@@ -29,7 +30,7 @@ TEMP_MERGE_DIR="$BASE_DIR/temp_merge_dir"
 check_dependencies() {
     echo -e "${BLUE}[INFO] Checking dependencies...${NC}"
     local MISSING=0
-    # 스크래핑 및 dialog 도구 제외.
+    # dialog 제외
     for cmd in wget unzip java python git; do
         if ! command -v $cmd &> /dev/null; then
             echo -e "${RED}[ERROR] '$cmd' not found. Please run 'pkg install ${cmd}'${NC}"
@@ -58,62 +59,72 @@ check_dependencies() {
 
 # --- 3. 파일 경로 수동 입력 (UI 제거) ---
 get_file_input() {
-    echo -e "\n${YELLOW}[INFO] 패치할 .apkm 파일의 전체 경로를 입력하세요.${NC}"
-    echo -e " (예: /storage/emulated/0/Download/com.kakao.talk.apkm)"
-    echo -e " (팁: 파일 관리자에서 파일을 Termux로 '공유'하여 경로를 복사할 수 있습니다.)"
+    echo -e "\n${YELLOW}[INFO] 패치할 .apk 또는 .apkm 파일의 전체 경로를 입력하세요.${NC}"
+    echo -e " (예: /storage/emulated/0/Download/kakaotalk.apk)"
     
-    read -p "> " SELECTED_APKM_PATH
+    read -p "> " SELECTED_FILE_PATH
 
     # 입력값 앞뒤의 작은따옴표/큰따옴표 제거 (경로 붙여넣기 시 오류 방지)
-    SELECTED_APKM_PATH=$(echo "$SELECTED_APKM_PATH" | tr -d \'\")
+    SELECTED_FILE_PATH=$(echo "$SELECTED_FILE_PATH" | tr -d \'\")
 
-    if [ -z "$SELECTED_APKM_PATH" ]; then
+    if [ -z "$SELECTED_FILE_PATH" ]; then
         echo -e "${RED}[ERROR] No path entered.${NC}"
         return 1
     fi
 
-    if [ ! -f "$SELECTED_APKM_PATH" ]; then
-         echo -e "${RED}[ERROR] File not found: $SELECTED_APKM_PATH${NC}"
+    if [ ! -f "$SELECTED_FILE_PATH" ]; then
+         echo -e "${RED}[ERROR] File not found: $SELECTED_FILE_PATH${NC}"
          return 1
     fi
     
-    if [[ "${SELECTED_APKM_PATH##*.}" != "apkm" ]]; then
-         echo -e "${RED}[ERROR] The selected file is not an .apkm file.${NC}"
+    # 파일 확장자 저장
+    FILE_EXT="${SELECTED_FILE_PATH##*.}"
+    
+    if [[ "$FILE_EXT" != "apk" && "$FILE_EXT" != "apkm" ]]; then
+         echo -e "${RED}[ERROR] The selected file is not an .apk or .apkm file.${NC}"
          return 1
     fi
     
-    echo -e "${GREEN}[SUCCESS] Selected file: $SELECTED_APKM_PATH${NC}"
+    echo -e "${GREEN}[SUCCESS] Selected file: $SELECTED_FILE_PATH${NC}"
 }
 
-# --- 4. 선택된 파일 병합 ---
-merge_file() {
-    echo -e "\n${BLUE}[INFO] Repackaging APKM file... (-> $MERGED_APK_PATH)${NC}"
-    rm -rf "$TEMP_MERGE_DIR" && mkdir -p "$TEMP_MERGE_DIR"
-    
-    # "하나도 놓치지 말고" 요청에 따라 모든 파일을 압축 해제
-    echo -e "${BLUE}[INFO] Extracting all files from .apkm...${NC}"
-    unzip -qqo "$SELECTED_APKM_PATH" -d "$TEMP_MERGE_DIR" 2> /dev/null
+# --- 4. 파일 준비 (병합 또는 복사) ---
+prepare_file() {
+    rm -f "$MERGED_APK_PATH" # 기존에 있던 파일 삭제
 
-    if [ ! -f "$TEMP_MERGE_DIR/base.apk" ]; then
-        echo -e "${RED}[ERROR] base.apk not found. Is the selected file a valid .apkm?${NC}"
-        rm -rf "$TEMP_MERGE_DIR"
-        return 1
-    fi
+    # .apkm 파일이면 병합 수행
+    if [[ "$FILE_EXT" == "apkm" ]]; then
+        echo -e "\n${BLUE}[INFO] .apkm file detected. Repackaging... (-> $MERGED_APK_PATH)${NC}"
+        rm -rf "$TEMP_MERGE_DIR" && mkdir -p "$TEMP_MERGE_DIR"
+        
+        echo -e "${BLUE}[INFO] Extracting all files from .apkm...${NC}"
+        unzip -qqo "$SELECTED_FILE_PATH" -d "$TEMP_MERGE_DIR" 2> /dev/null
 
-    echo -e "${BLUE}[INFO] Merging with APKEditor... (this may take a moment)${NC}"
-    rm -f "$MERGED_APK_PATH"
-    java -jar "$EDITOR_JAR" m -i "$TEMP_MERGE_DIR" -o "$MERGED_APK_PATH"
-    
-    if [ ! -f "$MERGED_APK_PATH" ]; then
-        echo -e "${RED}[ERROR] APKEditor merge failed.${NC}"
+        if [ ! -f "$TEMP_MERGE_DIR/base.apk" ]; then
+            echo -e "${RED}[ERROR] base.apk not found. Is the selected file a valid .apkm?${NC}"
+            rm -rf "$TEMP_MERGE_DIR"
+            return 1
+        fi
+
+        echo -e "${BLUE}[INFO] Merging with APKEditor... (this may take a moment)${NC}"
+        java -jar "$EDITOR_JAR" m -i "$TEMP_MERGE_DIR" -o "$MERGED_APK_PATH"
+        
+        if [ ! -f "$MERGED_APK_PATH" ]; then
+            echo -e "${RED}[ERROR] APKEditor merge failed.${NC}"
+            rm -rf "$TEMP_MERGE_DIR"
+            return 1
+        fi
+        
+        echo -e "${GREEN}[SUCCESS] Merge complete.${NC}"
         rm -rf "$TEMP_MERGE_DIR"
-        return 1
+    
+    # .apk 파일이면 그냥 복사
+    elif [[ "$FILE_EXT" == "apk" ]]; then
+        echo -e "\n${BLUE}[INFO] .apk file detected. Skipping merge.${NC}"
+        echo -e "${BLUE}[INFO] Copying file to target location... (-> $MERGED_APK_PATH)${NC}"
+        cp "$SELECTED_FILE_PATH" "$MERGED_APK_PATH"
+        echo -e "${GREEN}[SUCCESS] File copied.${NC}"
     fi
-    
-    echo -e "${GREEN}[SUCCESS] Merge complete: $MERGED_APK_PATH${NC}"
-    
-    # 임시 병합 폴더 정리 (원본 .apkm 파일은 삭제하지 않음)
-    rm -rf "$TEMP_MERGE_DIR"
 }
 
 # --- 5. 패치 스크립트 실행 ---
@@ -140,7 +151,6 @@ run_patch() {
 move_and_cleanup() {
     echo -e "\n${BLUE}[INFO] Moving patched file to SD Card root...${NC}"
     
-    # 패치 스크립트의 'out' 폴더에서 가장 최근에 생성된 .apk 파일을 찾음
     local PATCHED_FILE
     PATCHED_FILE=$(find "$PATCH_SCRIPT_DIR/out" -type f -name "*.apk" -print0 | xargs -0 ls -t | head -n 1)
 
@@ -150,16 +160,10 @@ move_and_cleanup() {
     fi
     
     local FINAL_FILENAME=$(basename "$PATCHED_FILE")
-    
-    # sdcard 최상위로 이동
     mv "$PATCHED_FILE" "$FINAL_OUTPUT_DIR/$FINAL_FILENAME"
-    
     echo -e "${GREEN}[SUCCESS] File moved to $FINAL_OUTPUT_DIR/$FINAL_FILENAME${NC}"
     
-    # 원본 병합 파일 삭제
     rm -f "$MERGED_APK_PATH"
-    
-    # 미디어 스캔
     am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d "file://$FINAL_OUTPUT_DIR/$FINAL_FILENAME"
 }
 
@@ -167,7 +171,7 @@ move_and_cleanup() {
 # --- 7. 메인 스크립트 실행 ---
 main() {
     clear
-    echo -e "${GREEN}=== Manual File Merge & Patch Script ===${NC}"
+    echo -e "${GREEN}=== Smart File Merge & Patch Script ===${NC}"
     
     # 1. 의존성 확인
     check_dependencies
@@ -178,8 +182,8 @@ main() {
         exit 0
     fi
     
-    # 3. 병합
-    if ! merge_file; then
+    # 3. 파일 준비 (병합 또는 복사)
+    if ! prepare_file; then
         exit 1
     fi
     
