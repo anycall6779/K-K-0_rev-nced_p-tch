@@ -17,7 +17,8 @@ NC='\033[0m'
 # App Info
 APP_NAME="KakaoTalk"
 PKG_NAME="com.kakao.talk"
-APKMIRROR_APP_NAME="kakaotalk"
+APKMIRROR_DEV="kakao-corp"
+APKMIRROR_APP="kakaotalk"
 
 # Paths
 BASE_DIR="/storage/emulated/0/Download"
@@ -121,25 +122,24 @@ check_dependencies() {
 # ==================== APKMIRROR SCRAPING ====================
 
 fetch_versions_list() {
-    log_info "Fetching app info from APKMirror API..."
+    log_info "Fetching app info from APKMirror..."
     
     check_internet || return 1
     
-    local PAGE_CONTENTS VERSIONS_TEXT URLS_LIST
+    local PAGE_CONTENTS
     
-    # Fetch main page
-    PAGE_CONTENTS=$("${CURL[@]}" -A "$USER_AGENT" "https://www.apkmirror.com/uploads/?appcategory=$APKMIRROR_APP_NAME" 2>/dev/null)
+    # Use search page instead of direct URL to avoid Wear OS redirect
+    PAGE_CONTENTS=$("${CURL[@]}" -A "$USER_AGENT" "https://www.apkmirror.com/?s=kakaotalk+messenger" 2>/dev/null)
     
     if [ -z "$PAGE_CONTENTS" ]; then
         log_error "Failed to fetch page from APKMirror"
         return 1
     fi
     
-    # Extract version numbers using pup
-    VERSIONS_TEXT=$(pup -c 'div.listWidget div.appRow h5.appRowTitle' <<< "$PAGE_CONTENTS" 2>/dev/null | pup 'text{}' 2>/dev/null)
+    # Extract version numbers and URLs - FIXED selectors
+    VERSIONS_TEXT=$(pup -c 'div.listWidget div.appRow h5' <<< "$PAGE_CONTENTS" 2>/dev/null | pup 'text{}' 2>/dev/null | grep -v '^$')
     
-    # Extract URLs using pup
-    URLS_LIST=$(pup -c 'div.listWidget div.appRow > a' <<< "$PAGE_CONTENTS" 2>/dev/null | pup 'attr{href}' 2>/dev/null)
+    URLS_LIST=$(pup -c 'div.listWidget div.appRow div.downloadIconPositioning a.fontBlack' <<< "$PAGE_CONTENTS" 2>/dev/null | pup 'attr{href}' 2>/dev/null | grep -v '^$')
     
     if [ -z "$VERSIONS_TEXT" ] || [ -z "$URLS_LIST" ]; then
         log_error "App not found in APKMirror"
