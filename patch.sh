@@ -73,15 +73,16 @@ choose_version() {
     local PAGE_CONTENTS
     PAGE_CONTENTS=$("${CURL[@]}" -A "$USER_AGENT" "https://www.apkmirror.com/uploads/?appcategory=$APKMIRROR_APP_NAME")
 
-    # --- [START] JQ SYNTAX FIX 4 ---
-    # `pup`가 JSON 배열을 반환하는 경우에 대비해,
-    # `.[]`를 추가하여 배열의 각 항목을 순회(iterate)하도록 수정합니다.
+    # --- [START] JQ SYNTAX FIX 5 ---
+    # `pup`가 반환하는 JSON의 HTML 구조가 변경됨에 따라, 
+    # 버전 텍스트를 찾는 경로를 .children[0].children[1].children[0].children[0].text로 수정합니다.
     readarray -t VERSIONS_LIST < <(
         pup -c 'div.listWidget a.fontBlack json{}' <<< "$PAGE_CONTENTS" |
             jq -rc '
-            .[] | # <--- 이 줄이 추가되었습니다. (배열을 푼다)
+            .[] | # pup가 반환하는 배열의 각 항목을 순회
             {
-                "version": .children[0].children[1].children[0].text,
+                # HTML 구조 변경에 따른 새 경로
+                "version": .children[0].children[1].children[0].children[0].text,
                 "url": .href
             } |
             # dialog (Tag, Item) 형식으로 출력
@@ -89,7 +90,7 @@ choose_version() {
             (.url | @json)
         ' | head -n 30 # 상위 15개 버전 (15 * 2줄 = 30줄)
     )
-    # --- [END] JQ SYNTAX FIX 4 ---
+    # --- [END] JQ SYNTAX FIX 5 ---
 
     if [ ${#VERSIONS_LIST[@]} -eq 0 ]; then
         echo -e "${RED}[ERROR] Failed to fetch version list. (Scraper may be broken)${NC}"
@@ -105,6 +106,12 @@ choose_version() {
             2>&1 > /dev/tty
     ); then
         return 1 # User pressed 'Cancel'
+    fi
+    
+    # 사용자가 null을 선택했는지 확인 (jq가 null을 반환했을 경우)
+    if [ -z "$SELECTED_URL_JSON" ] || [ "$SELECTED_URL_JSON" == "null" ]; then
+        echo -e "${RED}[ERROR] Invalid selection. (Selected item was null)${NC}"
+        return 1
     fi
     
     APP_DL_URL="https://www.apkmirror.com$(jq -r . <<< "$SELECTED_URL_JSON")"
