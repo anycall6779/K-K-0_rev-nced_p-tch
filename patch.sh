@@ -73,17 +73,14 @@ choose_version() {
     local PAGE_CONTENTS
     PAGE_CONTENTS=$("${CURL[@]}" -A "$USER_AGENT" "https://www.apkmirror.com/uploads/?appcategory=$APKMIRROR_APP_NAME")
 
-    # --- [START] PUP/JQ FIX ---
-    # APKMirror HTML 변경에 대응하여 'pup' 선택자와 'jq' 필터를 수정합니다.
-    # 기존: pup -c 'div.listWidget div:not([class]) json{}'
-    # 새 선택자: pup -c 'div.listWidget a.fontBlack json{}'
+    # --- [START] JQ SYNTAX FIX 3 ---
+    # `pup`가 JSON 객체의 스트림(JSON-lines)을 반환하므로,
+    # `.[]. |` (배열 반복) 구문을 제거하고 각 객체를 바로 처리합니다.
     readarray -t VERSIONS_LIST < <(
         pup -c 'div.listWidget a.fontBlack json{}' <<< "$PAGE_CONTENTS" |
             jq -rc '
-            .[]. |
             {
-                # HTML 구조 변경으로 버전 텍스트 경로 수정
-                "version": .children[0].children[1].children[0].text, 
+                "version": .children[0].children[1].children[0].text,
                 "url": .href
             } |
             # dialog (Tag, Item) 형식으로 출력
@@ -91,7 +88,7 @@ choose_version() {
             (.url | @json)
         ' | head -n 30 # 상위 15개 버전 (15 * 2줄 = 30줄)
     )
-    # --- [END] PUP/JQ FIX ---
+    # --- [END] JQ SYNTAX FIX 3 ---
 
     if [ ${#VERSIONS_LIST[@]} -eq 0 ]; then
         echo -e "${RED}[ERROR] Failed to fetch version list. (Scraper may be broken)${NC}"
@@ -131,7 +128,7 @@ scrape_download_link() {
                     .[].children[1:][].children |
                     if (.[1].text | test("universal|noarch|\($ARCH)")) and
                        (.[3].text | test("nodpi") or 
-                           (capture("(?<low>\\d+)-(?<high>\\d+)dpi") | 
+                           (capture("(?<low>\\d+)-(<high>\\d+)dpi") | 
                            (($DPI | tonumber) <= (.high | tonumber)) and (($DPI | tonumber) >= (.low | tonumber)))
                        )
                     then .[0].children else empty end
