@@ -1,3 +1,4 @@
+
 #!/bin/bash
 #
 # KakaoTalk Auto-Merge & Patch Script v3.1
@@ -136,30 +137,52 @@ fetch_versions_list() {
         return 1
     fi
     
-    # Extract version numbers and URLs - FIXED selectors
-    VERSIONS_TEXT=$(pup -c 'div.listWidget div.appRow h5' <<< "$PAGE_CONTENTS" 2>/dev/null | pup 'text{}' 2>/dev/null | grep -v '^$')
-    
-    URLS_LIST=$(pup -c 'div.listWidget div.appRow div.downloadIconPositioning a.fontBlack' <<< "$PAGE_CONTENTS" 2>/dev/null | pup 'attr{href}' 2>/dev/null | grep -v '^$')
-    
-    if [ -z "$VERSIONS_TEXT" ] || [ -z "$URLS_LIST" ]; then
-        log_error "App not found in APKMirror"
-        log_warning "This could be due to:"
-        echo "    - APKMirror HTML structure changed"
-        echo "    - Network/cloudflare protection"
-        echo "    - Incorrect app name: $APKMIRROR_APP_NAME"
+    if [ -z "$PAGE_CONTENTS" ]; then
+        log_error "Failed to fetch page from APKMirror"
         return 1
     fi
     
-    # Combine version text and URLs for dialog menu
+    # Save to temp file for processing
+    local TEMP_HTML="$BASE_DIR/.search_temp.html"
+    echo "$PAGE_CONTENTS" > "$TEMP_HTML"
+    
+    # Extract versions (clean, no Wear OS)
+    local ALL_VERSIONS
+    ALL_VERSIONS=$(pup -c 'h5' < "$TEMP_HTML" 2>/dev/null | \
+        pup 'text{}' 2>/dev/null | \
+        grep -i "KakaoTalk : Messenger" | \
+        grep -v "Wear OS" | \
+        sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    
+    # Extract URLs (only kakaotalk, no wear-os)
+    local ALL_URLS
+    ALL_URLS=$(pup 'div.appRow a.fontBlack' < "$TEMP_HTML" 2>/dev/null | \
+        grep 'href=' | \
+        grep -o 'href="[^"]*"' | \
+        cut -d'"' -f2 | \
+        grep '/kakaotalk/' | \
+        grep -v 'wear-os')
+    
+    rm -f "$TEMP_HTML"
+    
+    if [ -z "$ALL_VERSIONS" ] || [ -z "$ALL_URLS" ]; then
+        log_error "App not found in APKMirror"
+        log_warning "Debug info:"
+        echo "    Versions found: $(echo "$ALL_VERSIONS" | wc -l)"
+        echo "    URLs found: $(echo "$ALL_URLS" | wc -l)"
+        return 1
+    fi
+    
+    # Combine versions and URLs
     readarray -t VERSIONS_LIST < <(
-        paste <(echo "$VERSIONS_TEXT") <(echo "$URLS_LIST") |
+        paste <(echo "$ALL_VERSIONS") <(echo "$ALL_URLS") |
         awk -F'\t' '{
-            # Clean version text
-            gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1);
-            print $1;
-            print $2;
+            if ($1 != "" && $2 != "") {
+                print $1;
+                print $2;
+            }
         }' |
-        head -n 40  # Top 20 versions (20 * 2 lines)
+        head -40
     )
     
     if [ ${#VERSIONS_LIST[@]} -eq 0 ]; then
