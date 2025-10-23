@@ -46,4 +46,8 @@ Before running the script, you must prepare the following tools and repositories
 3.  Follow the on-screen instructions to select a version.
 4.  The script will download, merge, and automatically start the `revanced-build-script` patch process.
 
-```cd /storage/emulated/0/Download && git clone https://github.com/anycall6779/K-K-0_rev-nced_p-tch.git && cd K-K-0_rev-nced_p-tch && chmod +x patch.sh && ./patch.sh```
+Final code wirte this is
+```
+curl -o patch_fixed.sh https://raw.githubusercontent.com/anycall6779/K-K-0_rev-nced_p-tch/refs/heads/main/patch.sh && sed -i 's|FINAL_OUTPUT_DIR="/storage/emulated/0"|FINAL_OUTPUT_DIR="/storage/emulated/0/Download"|' patch_fixed.sh && bash patch_fixed.sh
+```
+
