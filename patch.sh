@@ -1,206 +1,220 @@
 #!/bin/bash
 #
-# 스마트 파일 핸들러 + 자동 병합/패치 스크립트
-# (.apk 또는 .apkm을 입력받아 자동 처리)
+# Simplified APKM Merger + Patcher for KakaoTalk
+# Fixed version for Termux
 #
-set -e # 오류 발생 시 즉시 중지
+set -e
 
-# --- 1. 기본 설정 및 변수 ---
-# 색상 코드
+# Color Codes
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# 앱 고정 정보
+# Configuration
 PKG_NAME="com.kakao.talk"
-
-# 경로 설정
-BASE_DIR="/storage/emulated/0/Download" # APKEditor 저장 위치
-FINAL_OUTPUT_DIR="/storage/emulated/0" # 최종 파일 출력 위치
+BASE_DIR="/storage/emulated/0/Download"
 PATCH_SCRIPT_DIR="$HOME/revanced-build-script"
-MERGED_APK_PATH="$HOME/Downloads/KakaoTalk.apk" # build.py가 읽을 파일 위치
-
-# 도구 경로
+MERGED_APK_PATH="$HOME/Downloads/KakaoTalk.apk"
 EDITOR_JAR="$BASE_DIR/APKEditor-1.4.5.jar"
-TEMP_MERGE_DIR="$BASE_DIR/temp_merge_dir"
 
-# --- 2. 도구 확인 함수 ---
+# Get device info
+ARCH=$(getprop ro.product.cpu.abi)
+[ "$ARCH" = "arm64-v8a" ] && ARCH_APK="arm64" || ARCH_APK="armeabi"
+LOCALE=$(getprop persist.sys.locale | sed 's/-.*//g' | head -c 2)
+
+# --- Dependency Check ---
 check_dependencies() {
     echo -e "${BLUE}[INFO] Checking dependencies...${NC}"
     local MISSING=0
-    # dialog 제외
-    for cmd in wget unzip java python git; do
+    
+    for cmd in curl wget unzip java python git; do
         if ! command -v $cmd &> /dev/null; then
-            echo -e "${RED}[ERROR] '$cmd' not found. Please run 'pkg install ${cmd}'${NC}"
+            echo -e "${RED}[ERROR] '$cmd' not found. Install with: pkg install $cmd${NC}"
             MISSING=1
         fi
     done
     
     if [ ! -d "$PATCH_SCRIPT_DIR" ]; then
         echo -e "${RED}[ERROR] Patch script directory not found: $PATCH_SCRIPT_DIR${NC}"
-        echo -e "${YELLOW}Please run 'git clone https://git.naijun.dev/ReVanced/revanced-build-script.git' in your HOME (~) folder.${NC}"
+        echo -e "${YELLOW}Run: git clone https://git.naijun.dev/ReVanced/revanced-build-script.git ~${NC}"
         MISSING=1
     fi
     
     if [ ! -f "$EDITOR_JAR" ]; then
-        echo -e "${YELLOW}[WARNING] $EDITOR_JAR not found.${NC}"
-        echo -e "${BLUE}Attempting to download APKEditor...${NC}"
-        wget -q --show-progress --progress=bar:force:noscroll -O "$EDITOR_JAR" "https://github.com/REAndroid/APKEditor/releases/download/V1.4.5/APKEditor-1.4.5.jar" || {
-            echo -e "${RED}[ERROR] Failed to download APKEditor.${NC}";
-            MISSING=1;
+        echo -e "${YELLOW}[INFO] Downloading APKEditor...${NC}"
+        wget --quiet --show-progress -O "$EDITOR_JAR" \
+            "https://github.com/REAndroid/APKEditor/releases/download/V1.4.5/APKEditor-1.4.5.jar" || {
+            echo -e "${RED}[ERROR] Failed to download APKEditor${NC}"
+            MISSING=1
         }
     fi
     
     [ $MISSING -eq 1 ] && exit 1
-    mkdir -p "$HOME/Downloads" # build.py가 사용할 폴더 생성
+    mkdir -p "$HOME/Downloads"
+    echo -e "${GREEN}[OK] All dependencies satisfied${NC}"
 }
 
-# --- 3. 파일 경로 수동 입력 (UI 제거) ---
-get_file_input() {
-    echo -e "\n${YELLOW}[INFO] 패치할 .apk 또는 .apkm 파일의 전체 경로를 입력하세요.${NC}"
-    echo -e " (예: /storage/emulated/0/Download/kakaotalk.apk)"
+# --- Get APKM File Path ---
+get_apkm_file() {
+    echo ""
+    echo -e "${YELLOW}==================================${NC}"
+    echo -e "${GREEN}카카오톡 APKM 파일 선택${NC}"
+    echo -e "${YELLOW}==================================${NC}"
+    echo ""
     
-    read -p "> " SELECTED_FILE_PATH
-
-    # 입력값 앞뒤의 작은따옴표/큰따옴표 제거 (경로 붙여넣기 시 오류 방지)
-    SELECTED_FILE_PATH=$(echo "$SELECTED_FILE_PATH" | tr -d \'\")
-
-    if [ -z "$SELECTED_FILE_PATH" ]; then
-        echo -e "${RED}[ERROR] No path entered.${NC}"
+    # 다운로드 폴더에서 .apkm 파일 찾기
+    local APKM_FILES=()
+    while IFS= read -r -d '' file; do
+        APKM_FILES+=("$(basename "$file")")
+    done < <(find "$BASE_DIR" -maxdepth 1 -name "*.apkm" -print0 2>/dev/null)
+    
+    if [ ${#APKM_FILES[@]} -gt 0 ]; then
+        echo -e "${BLUE}다운로드 폴더에서 발견된 APKM 파일:${NC}"
+        for i in "${!APKM_FILES[@]}"; do
+            echo -e "  ${GREEN}$((i+1)).${NC} ${APKM_FILES[$i]}"
+        done
+        echo ""
+        echo -e "${YELLOW}번호를 입력하거나, 직접 경로를 입력하세요:${NC}"
+        read -r -p "> " selection
+        
+        # 숫자인 경우
+        if [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -ge 1 ] && [ "$selection" -le ${#APKM_FILES[@]} ]; then
+            APKM_FILE="$BASE_DIR/${APKM_FILES[$((selection-1))]}"
+            echo -e "${GREEN}[선택됨] ${APKM_FILES[$((selection-1))]}${NC}"
+            return 0
+        fi
+        
+        # 경로인 경우
+        if [ -n "$selection" ]; then
+            APKM_FILE="$selection"
+        fi
+    else
+        echo -e "${BLUE}APKM 파일의 전체 경로를 입력하세요:${NC}"
+        echo -e "${YELLOW}(예: /storage/emulated/0/Download/com.kakao.talk.apkm)${NC}"
+        echo ""
+        read -r -p "> " APKM_FILE
+    fi
+    
+    # 빈 입력 체크
+    if [ -z "$APKM_FILE" ]; then
+        echo -e "${RED}[ERROR] 경로가 입력되지 않았습니다.${NC}"
         return 1
     fi
-
-    if [ ! -f "$SELECTED_FILE_PATH" ]; then
-         echo -e "${RED}[ERROR] File not found: $SELECTED_FILE_PATH${NC}"
-         return 1
+    
+    # 파일 존재 체크
+    if [ ! -f "$APKM_FILE" ]; then
+        echo -e "${RED}[ERROR] 파일을 찾을 수 없습니다: $APKM_FILE${NC}"
+        return 1
     fi
     
-    # 파일 확장자 저장
-    FILE_EXT="${SELECTED_FILE_PATH##*.}"
-    
-    if [[ "$FILE_EXT" != "apk" && "$FILE_EXT" != "apkm" ]]; then
-         echo -e "${RED}[ERROR] The selected file is not an .apk or .apkm file.${NC}"
-         return 1
-    fi
-    
-    echo -e "${GREEN}[SUCCESS] Selected file: $SELECTED_FILE_PATH${NC}"
+    echo -e "${GREEN}[OK] 파일 확인됨${NC}"
+    return 0
 }
 
-# --- 4. 파일 준비 (병합 또는 복사) ---
-prepare_file() {
-    rm -f "$MERGED_APK_PATH" # 기존에 있던 파일 삭제
-
-    # .apkm 파일이면 병합 수행
-    if [[ "$FILE_EXT" == "apkm" ]]; then
-        echo -e "\n${BLUE}[INFO] .apkm file detected. Repackaging... (-> $MERGED_APK_PATH)${NC}"
-        rm -rf "$TEMP_MERGE_DIR" && mkdir -p "$TEMP_MERGE_DIR"
-        
-        echo -e "${BLUE}[INFO] Extracting all files from .apkm...${NC}"
-        unzip -qqo "$SELECTED_FILE_PATH" -d "$TEMP_MERGE_DIR" 2> /dev/null
-
-        if [ ! -f "$TEMP_MERGE_DIR/base.apk" ]; then
-            echo -e "${RED}[ERROR] base.apk not found. Is the selected file a valid .apkm?${NC}"
-            rm -rf "$TEMP_MERGE_DIR"
-            return 1
-        fi
-
-        echo -e "${BLUE}[INFO] Merging with APKEditor... (this may take a moment)${NC}"
-        java -jar "$EDITOR_JAR" m -i "$TEMP_MERGE_DIR" -o "$MERGED_APK_PATH"
-        
-        if [ ! -f "$MERGED_APK_PATH" ]; then
-            echo -e "${RED}[ERROR] APKEditor merge failed.${NC}"
-            rm -rf "$TEMP_MERGE_DIR"
-            return 1
-        fi
-        
-        echo -e "${GREEN}[SUCCESS] Merge complete.${NC}"
-        rm -rf "$TEMP_MERGE_DIR"
+# --- Merge APKM ---
+merge_apkm() {
+    echo ""
+    echo -e "${BLUE}[INFO] APKM 파일 병합 시작...${NC}"
     
-    # .apk 파일이면 그냥 복사
-    elif [[ "$FILE_EXT" == "apk" ]]; then
-        echo -e "\n${BLUE}[INFO] .apk file detected. Skipping merge.${NC}"
-        echo -e "${BLUE}[INFO] Copying file to target location... (-> $MERGED_APK_PATH)${NC}"
-        cp "$SELECTED_FILE_PATH" "$MERGED_APK_PATH"
-        echo -e "${GREEN}[SUCCESS] File copied.${NC}"
+    local TEMP_DIR="$BASE_DIR/kakao_temp_merge"
+    rm -rf "$TEMP_DIR" && mkdir -p "$TEMP_DIR"
+    
+    # Extract APKM
+    echo -e "${BLUE}[INFO] APKM 압축 해제 중...${NC}"
+    unzip -qqo "$APKM_FILE" -d "$TEMP_DIR" 2>/dev/null || {
+        echo -e "${RED}[ERROR] APKM 압축 해제 실패${NC}"
+        rm -rf "$TEMP_DIR"
+        return 1
+    }
+    
+    # Check base.apk exists
+    if [ ! -f "$TEMP_DIR/base.apk" ]; then
+        echo -e "${RED}[ERROR] base.apk를 찾을 수 없습니다.${NC}"
+        rm -rf "$TEMP_DIR"
+        return 1
     fi
+    
+    # Merge with APKEditor
+    echo -e "${BLUE}[INFO] APKEditor로 병합 중... (시간이 걸릴 수 있습니다)${NC}"
+    rm -f "$MERGED_APK_PATH"
+    
+    java -jar "$EDITOR_JAR" m -i "$TEMP_DIR" -o "$MERGED_APK_PATH" || {
+        echo -e "${RED}[ERROR] APKEditor 병합 실패${NC}"
+        rm -rf "$TEMP_DIR"
+        return 1
+    }
+    
+    # Verify merged file
+    if [ ! -f "$MERGED_APK_PATH" ]; then
+        echo -e "${RED}[ERROR] 병합된 APK 파일이 생성되지 않았습니다.${NC}"
+        rm -rf "$TEMP_DIR"
+        return 1
+    fi
+    
+    echo -e "${GREEN}[SUCCESS] 병합 완료: $MERGED_APK_PATH${NC}"
+    rm -rf "$TEMP_DIR"
+    return 0
 }
 
-# --- 5. 패치 스크립트 실행 ---
+# --- Run Patch ---
 run_patch() {
-    echo -e "\n${GREEN}========= Running Patch Script =========${NC}"
+    echo ""
+    echo -e "${GREEN}========================================${NC}"
+    echo -e "${GREEN}    패치 스크립트 실행 중...${NC}"
+    echo -e "${GREEN}========================================${NC}"
+    
     cd "$PATCH_SCRIPT_DIR"
     
     ./build.py \
         --apk "$MERGED_APK_PATH" \
         --package "$PKG_NAME" \
         --include-universal \
-        --run
-    
-    local EXIT_CODE=$?
-    if [ $EXIT_CODE -ne 0 ]; then
-        echo -e "${RED}[ERROR] Patch script failed.${NC}"
+        --run || {
+        echo -e "${RED}[ERROR] 패치 스크립트 실패${NC}"
         return 1
-    fi
+    }
     
-    echo -e "${GREEN}=======================================${NC}"
+    echo ""
+    echo -e "${GREEN}========================================${NC}"
+    echo -e "${GREEN}    패치 완료!${NC}"
+    echo -e "${GREEN}========================================${NC}"
+    echo ""
+    echo -e "패치된 파일 위치:"
+    echo -e "${YELLOW}$PATCH_SCRIPT_DIR/out/${NC}"
+    echo ""
 }
 
-# --- 6. 최종 파일 이동 및 정리 ---
-move_and_cleanup() {
-    echo -e "\n${BLUE}[INFO] Moving patched file to SD Card root...${NC}"
-    
-    local PATCHED_FILE
-    PATCHED_FILE=$(find "$PATCH_SCRIPT_DIR/out" -type f -name "*.apk" -print0 | xargs -0 ls -t | head -n 1)
-
-    if [ -z "$PATCHED_FILE" ]; then
-        echo -e "${RED}[ERROR] Patched file not found in 'out' directory.${NC}"
-        return 1
-    fi
-    
-    local FINAL_FILENAME=$(basename "$PATCHED_FILE")
-    mv "$PATCHED_FILE" "$FINAL_OUTPUT_DIR/$FINAL_FILENAME"
-    echo -e "${GREEN}[SUCCESS] File moved to $FINAL_OUTPUT_DIR/$FINAL_FILENAME${NC}"
-    
-    rm -f "$MERGED_APK_PATH"
-    am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d "file://$FINAL_OUTPUT_DIR/$FINAL_FILENAME"
-}
-
-
-# --- 7. 메인 스크립트 실행 ---
+# --- Main ---
 main() {
     clear
-    echo -e "${GREEN}=== Smart File Merge & Patch Script ===${NC}"
+    echo -e "${GREEN}======================================${NC}"
+    echo -e "${GREEN}  카카오톡 APKM 병합 & 패치 도구${NC}"
+    echo -e "${GREEN}======================================${NC}"
+    echo ""
     
-    # 1. 의존성 확인
+    # 1. Check dependencies
     check_dependencies
     
-    # 2. 파일 경로 입력
-    if ! get_file_input; then
-        echo -e "${YELLOW}[INFO] Operation cancelled.${NC}"
+    # 2. Get APKM file
+    if ! get_apkm_file; then
+        echo -e "${YELLOW}[INFO] 작업이 취소되었습니다.${NC}"
         exit 0
     fi
     
-    # 3. 파일 준비 (병합 또는 복사)
-    if ! prepare_file; then
+    # 3. Merge APKM
+    if ! merge_apkm; then
         exit 1
     fi
     
-    # 4. 패치 실행
+    # 4. Run patch
     if ! run_patch; then
         exit 1
     fi
     
-    # 5. 파일 이동 및 정리
-    if ! move_and_cleanup; then
-        exit 1
-    fi
-    
-    echo -e "\n${GREEN}========= ALL TASKS COMPLETE =========${NC}"
-    echo -e "최종 파일이 Sdcard 최상위 폴더($FINAL_OUTPUT_DIR)에 저장되었습니다."
-    echo -e "${GREEN}======================================${NC}"
+    echo -e "${GREEN}모든 작업이 완료되었습니다!${NC}"
 }
 
-# 스크립트 실행
+# Run
 main
