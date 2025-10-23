@@ -73,20 +73,20 @@ choose_version() {
     local PAGE_CONTENTS
     PAGE_CONTENTS=$("${CURL[@]}" -A "$USER_AGENT" "https://www.apkmirror.com/uploads/?appcategory=$APKMIRROR_APP_NAME")
 
-    # --- [START] JQ/PUP FIX 10 ---
-    # `Revancify` 원본 'version.sh'의 선택자 로직을 복원합니다.
-    # 이것이 가장 정확한 HTML 경로일 것입니다.
+    # --- [START] JQ/PUP FIX (Based on Revancify v2.7.2 'version.sh') ---
+    # `Revancify` 원본의 정확한 선택자와 `jq` 경로를 사용합니다.
     readarray -t VERSIONS_LIST < <(
         pup -c 'div.widget_appmanager_recentpostswidget div.listWidget div:not([class]) json{}' <<< "$PAGE_CONTENTS" |
             jq -rc '
             .[] | .children as $CHILDREN | # pup가 반환하는 배열의 각 항목을 순회
             {
-                # Revancify 원본 스니펫의 경로
+                # Revancify (version.sh) 원본 경로
                 version: $CHILDREN[1].children[0].children[1].text,
                 url: $CHILDREN[0].children[0].children[1].children[0].children[0].children[0].href
             } |
             # null이 아닌 항목만 필터링
             if .version != null and .url != null then
+                # dialog (Tag, Item) 형식으로 출력
                 .version,
                 (.url | @json)
             else
@@ -94,7 +94,7 @@ choose_version() {
             end
         ' | head -n 30 # 상위 15개 버전 (15 * 2줄 = 30줄)
     )
-    # --- [END] JQ/PUP FIX 10 ---
+    # --- [END] JQ/PUP FIX ---
 
     if [ ${#VERSIONS_LIST[@]} -eq 0 ]; then
         echo -e "${RED}[ERROR] Failed to fetch version list. (Scraper may be broken)${NC}"
@@ -131,11 +131,13 @@ scrape_download_link() {
     
     PAGE1=$("${CURL[@]}" -A "$USER_AGENT" "$APP_DL_URL")
 
+    # `Revancify` (download.sh) 원본 로직
     readarray -t VARIANT_INFO < <(
         pup -p --charset utf-8 'div.variants-table json{}' <<< "$PAGE1" |
             jq -r \
                 --arg ARCH "$ARCH" \
-                --arg DPI "$DPI" '
+                --arg DPI "$DPI" \
+                --arg APP_FORMAT "BUNDLE" '
                 [
                     .[].children[1:][].children |
                     if (.[1].text | test("universal|noarch|\($ARCH)")) and
@@ -145,7 +147,7 @@ scrape_download_link() {
                        )
                     then .[0].children else empty end
                 ] |
-                (.[[] | if (.[1].text == "BUNDLE") then .[0].href else empty end][-1]) // (.[[] | .[0].href][-1])
+                (.[[] | if (.[1].text == $APP_FORMAT) then .[0].href else empty end][-1]) // (.[[] | .[0].href][-1])
             '
     )
     
@@ -188,6 +190,7 @@ download_and_merge() {
     local TEMP_DIR="$BASE_DIR/mod_temp_merge"
     rm -rf "$TEMP_DIR" && mkdir -p "$TEMP_DIR"
     
+    # `Revancify` (antisplit.sh) 원본 로직
     unzip -qqo "$APKM_FILE" \
         "base.apk" \
         "split_config.${ARCH_APK}_v8a.apk" \
@@ -222,6 +225,7 @@ run_patch() {
     echo -e "\n${GREEN}========= Running Patch Script =========${NC}"
     cd "$PATCH_SCRIPT_DIR"
     
+    # `Revancify` (patch.sh) 원본 로직
     ./build.py \
         --apk "$MERGED_APK_PATH" \
         --package "$PKG_NAME" \
