@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# APKM URL 수동 입력 + 자동 병합 + 자동 패치 스크립트
+# APKM 파일 수동 선택 + 자동 병합 + 자동 패치 스크립트
 #
 set -e # 오류 발생 시 즉시 중지
 
@@ -16,27 +16,25 @@ NC='\033[0m' # No Color
 PKG_NAME="com.kakao.talk"
 
 # 경로 설정
-BASE_DIR="/storage/emulated/0/Download" # 임시 파일 저장 위치
+BASE_DIR="/storage/emulated/0/Download" # APKEditor 저장 위치 및 파일 탐색 시작 위치
 FINAL_OUTPUT_DIR="/storage/emulated/0" # 최종 파일 출력 위치
 PATCH_SCRIPT_DIR="$HOME/revanced-build-script"
 MERGED_APK_PATH="$HOME/Downloads/KakaoTalk.apk" # build.py가 읽을 파일 위치
 
 # 도구 경로
 EDITOR_JAR="$BASE_DIR/APKEditor-1.4.5.jar"
-TEMP_APKM_FILE="$BASE_DIR/temp_download.apkm"
 TEMP_MERGE_DIR="$BASE_DIR/temp_merge_dir"
 
 # Termux UI 도구
-DIALOG=(dialog --keep-tite --no-shadow --no-collapse --visit-items --ok-label "확인" --cancel-label "취소")
-CURL=(curl -L -s -k --compressed --retry 3 --retry-delay 1)
-WGET=(wget --quiet --show-progress --progress=bar:force:noscroll --no-check-certificate)
+DIALOG=(dialog --keep-tite --no-shadow --no-collapse --visit-items --ok-label "선택" --cancel-label "취소")
 
 # --- 2. 도구 확인 함수 ---
 check_dependencies() {
     echo -e "${BLUE}[INFO] Checking dependencies...${NC}"
     local MISSING=0
-    # 스크래핑 도구(pup) 제외, URL 입력(dialog), 병합(unzip, java), 패치(python, git) 확인
-    for cmd in dialog wget unzip java python git jq; do
+    # 스크래핑 도구(curl, pup, jq) 완전 제외.
+    # 파일 선택(dialog), 병합(unzip, java, wget), 패치(python, git)만 확인.
+    for cmd in dialog wget unzip java python git; do
         if ! command -v $cmd &> /dev/null; then
             echo -e "${RED}[ERROR] '$cmd' not found. Please run 'pkg install ${cmd}'${NC}"
             MISSING=1
@@ -52,7 +50,7 @@ check_dependencies() {
     if [ ! -f "$EDITOR_JAR" ]; then
         echo -e "${YELLOW}[WARNING] $EDITOR_JAR not found.${NC}"
         echo -e "${BLUE}Attempting to download APKEditor...${NC}"
-        "${WGET[@]}" -O "$EDITOR_JAR" "https://github.com/REAndroid/APKEditor/releases/download/V1.4.5/APKEditor-1.4.5.jar" || {
+        wget -q --show-progress --progress=bar:force:noscroll -O "$EDITOR_JAR" "https://github.com/REAndroid/APKEditor/releases/download/V1.4.5/APKEditor-1.4.5.jar" || {
             echo -e "${RED}[ERROR] Failed to download APKEditor.${NC}";
             MISSING=1;
         }
@@ -62,44 +60,45 @@ check_dependencies() {
     mkdir -p "$HOME/Downloads" # build.py가 사용할 폴더 생성
 }
 
-# --- 3. URL 수동 입력 ---
-get_url_input() {
-    if ! APKM_URL=$(
+# --- 3. 파일 수동 선택 ---
+get_file_input() {
+    echo -e "${YELLOW}[INFO] Please select the .apkm file you downloaded.${NC}"
+    
+    if ! SELECTED_APKM_PATH=$(
         "${DIALOG[@]}" \
-            --title "| APKM 다운로드 URL 입력 |" \
-            --inputbox "APKMirror에서 복사한 .apkm의 '직접 다운로드 링크'를 붙여넣으세요:" 10 70 \
+            --title "| .apkm 파일 선택 |" \
+            --fselect "$BASE_DIR/" 20 70 \
             2>&1 > /dev/tty
     ); then
         return 1 # '취소' 선택
     fi
 
-    if [ -z "$APKM_URL" ]; then
-        echo -e "${RED}[ERROR] URL이 입력되지 않았습니다.${NC}"
+    if [ -z "$SELECTED_APKM_PATH" ]; then
+        echo -e "${RED}[ERROR] No file selected.${NC}"
         return 1
     fi
+    
+    # 파일이 .apkm이 맞는지 확인
+    if [[ "${SELECTED_APKM_PATH##*.}" != "apkm" ]]; then
+         echo -e "${RED}[ERROR] The selected file is not an .apkm file.${NC}"
+         return 1
+    fi
+    
+    echo -e "${GREEN}[SUCCESS] Selected file: $SELECTED_APKM_PATH${NC}"
 }
 
-# --- 4. 다운로드 및 병합 ---
-download_and_merge() {
-    echo -e "\n${BLUE}[INFO] Downloading file from URL...${NC}"
-    rm -f "$TEMP_APKM_FILE"
-    "${WGET[@]}" "$APKM_URL" -O "$TEMP_APKM_FILE"
-    
-    if [ ! -f "$TEMP_APKM_FILE" ]; then
-        echo -e "${RED}[ERROR] File download failed.${NC}"
-        return 1
-    fi
-
+# --- 4. 선택된 파일 병합 ---
+merge_file() {
     echo -e "\n${BLUE}[INFO] Repackaging APKM file... (-> $MERGED_APK_PATH)${NC}"
     rm -rf "$TEMP_MERGE_DIR" && mkdir -p "$TEMP_MERGE_DIR"
     
     # "하나도 놓치지 말고" 요청에 따라 모든 파일을 압축 해제
     echo -e "${BLUE}[INFO] Extracting all files from .apkm...${NC}"
-    unzip -qqo "$TEMP_APKM_FILE" -d "$TEMP_MERGE_DIR" 2> /dev/null
+    unzip -qqo "$SELECTED_APKM_PATH" -d "$TEMP_MERGE_DIR" 2> /dev/null
 
     if [ ! -f "$TEMP_MERGE_DIR/base.apk" ]; then
-        echo -e "${RED}[ERROR] base.apk not found in the downloaded file.${NC}"
-        rm -rf "$TEMP_MERGE_DIR" "$TEMP_APKM_FILE"
+        echo -e "${RED}[ERROR] base.apk not found. Is the selected file a valid .apkm?${NC}"
+        rm -rf "$TEMP_MERGE_DIR"
         return 1
     fi
 
@@ -109,14 +108,13 @@ download_and_merge() {
     
     if [ ! -f "$MERGED_APK_PATH" ]; then
         echo -e "${RED}[ERROR] APKEditor merge failed.${NC}"
-        rm -rf "$TEMP_MERGE_DIR" "$TEMP_APKM_FILE"
+        rm -rf "$TEMP_MERGE_DIR"
         return 1
     fi
     
     echo -e "${GREEN}[SUCCESS] Merge complete: $MERGED_APK_PATH${NC}"
     
-    # 임시 다운로드/병합 파일 정리
-    rm -f "$TEMP_APKM_FILE"
+    # 임시 병합 폴더 정리 (원본 .apkm 파일은 삭제하지 않음)
     rm -rf "$TEMP_MERGE_DIR"
 }
 
@@ -171,19 +169,19 @@ move_and_cleanup() {
 # --- 7. 메인 스크립트 실행 ---
 main() {
     clear
-    echo -e "${GREEN}=== Manual URL Merge & Patch Script ===${NC}"
+    echo -e "${GREEN}=== Manual File Merge & Patch Script ===${NC}"
     
     # 1. 의존성 확인
     check_dependencies
     
-    # 2. URL 입력받기
-    if ! get_url_input; then
+    # 2. 파일 선택
+    if ! get_file_input; then
         echo -e "${YELLOW}[INFO] Operation cancelled.${NC}"
         exit 0
     fi
     
-    # 3. 다운로드 및 병합
-    if ! download_and_merge; then
+    # 3. 병합
+    if ! merge_file; then
         exit 1
     fi
     
@@ -198,7 +196,7 @@ main() {
     fi
     
     echo -e "\n${GREEN}========= ALL TASKS COMPLETE =========${NC}"
-    echo -e "최종 파일이 Sdcard 최상위 폴더에 저장되었습니다."
+    echo -e "최종 파일이 Sdcard 최상위 폴더($FINAL_OUTPUT_DIR)에 저장되었습니다."
     echo -e "${GREEN}======================================${NC}"
 }
 
