@@ -73,12 +73,13 @@ choose_version() {
     local PAGE_CONTENTS
     PAGE_CONTENTS=$("${CURL[@]}" -A "$USER_AGENT" "https://www.apkmirror.com/uploads/?appcategory=$APKMIRROR_APP_NAME")
 
-    # --- [START] JQ SYNTAX FIX 3 ---
-    # `pup`가 JSON 객체의 스트림(JSON-lines)을 반환하므로,
-    # `.[]. |` (배열 반복) 구문을 제거하고 각 객체를 바로 처리합니다.
+    # --- [START] JQ SYNTAX FIX 4 ---
+    # `pup`가 JSON 배열을 반환하는 경우에 대비해,
+    # `.[]`를 추가하여 배열의 각 항목을 순회(iterate)하도록 수정합니다.
     readarray -t VERSIONS_LIST < <(
         pup -c 'div.listWidget a.fontBlack json{}' <<< "$PAGE_CONTENTS" |
             jq -rc '
+            .[] | # <--- 이 줄이 추가되었습니다. (배열을 푼다)
             {
                 "version": .children[0].children[1].children[0].text,
                 "url": .href
@@ -88,7 +89,7 @@ choose_version() {
             (.url | @json)
         ' | head -n 30 # 상위 15개 버전 (15 * 2줄 = 30줄)
     )
-    # --- [END] JQ SYNTAX FIX 3 ---
+    # --- [END] JQ SYNTAX FIX 4 ---
 
     if [ ${#VERSIONS_LIST[@]} -eq 0 ]; then
         echo -e "${RED}[ERROR] Failed to fetch version list. (Scraper may be broken)${NC}"
@@ -128,7 +129,7 @@ scrape_download_link() {
                     .[].children[1:][].children |
                     if (.[1].text | test("universal|noarch|\($ARCH)")) and
                        (.[3].text | test("nodpi") or 
-                           (capture("(?<low>\\d+)-(<high>\\d+)dpi") | 
+                           (capture("(?<low>\\d+)-(?<high>\\d+)dpi") | 
                            (($DPI | tonumber) <= (.high | tonumber)) and (($DPI | tonumber) >= (.low | tonumber)))
                        )
                     then .[0].children else empty end
