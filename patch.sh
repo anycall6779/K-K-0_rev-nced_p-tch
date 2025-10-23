@@ -41,6 +41,7 @@ WGET=(wget --quiet --show-progress --progress=bar:force:noscroll --no-check-cert
 check_dependencies() {
     echo -e "${BLUE}[INFO] Checking dependencies...${NC}"
     local MISSING=0
+    # JQ를 버전 선택에서 제거했으므로, 의존성 검사에서는 남겨둠 (build.py가 쓸 수 있으므로)
     for cmd in dialog curl pup jq wget unzip java python git; do
         if ! command -v $cmd &> /dev/null; then
             echo -e "${RED}[ERROR] '$cmd' not found. Please run 'pkg install ${cmd}'${NC}"
@@ -73,36 +74,31 @@ choose_version() {
     local PAGE_CONTENTS
     PAGE_CONTENTS=$("${CURL[@]}" -A "$USER_AGENT" "https://www.apkmirror.com/uploads/?appcategory=$APKMIRROR_APP_NAME")
 
-    # --- [START] JQ/PUP FIX (Based on Revancify v2.7.2 'version.sh') ---
-    # `Revancify` 원본의 정확한 선택자와 `jq` 경로를 사용합니다.
+    # --- [START] JQ/PUP FIX 10 (Final) ---
+    # JQ를 완전히 제거하고, pup, paste, awk로만 목록을 생성
+    
+    local VERSIONS_TEXT URLS_LIST
+    
+    # 1. 버전 텍스트 추출 (e.g., "10.7.5")
+    VERSIONS_TEXT=$(pup -c 'div.listWidget .appRow > a > div > span.appVersion' <<< "$PAGE_CONTENTS" | pup 'text{}')
+    # 2. URL 추출 (e.g., "/apk/kakao-corp/...")
+    URLS_LIST=$(pup -c 'div.listWidget .appRow > a' <<< "$PAGE_CONTENTS" | pup 'attr{href}')
+
+    # 3. `paste`로 두 리스트를 탭(\t)으로 병합하고, `awk`로 dialog 형식(Tag, Item)으로 변환
     readarray -t VERSIONS_LIST < <(
-        pup -c 'div.widget_appmanager_recentpostswidget div.listWidget div:not([class]) json{}' <<< "$PAGE_CONTENTS" |
-            jq -rc '
-            .[] | .children as $CHILDREN | # pup가 반환하는 배열의 각 항목을 순회
-            {
-                # Revancify (version.sh) 원본 경로
-                version: $CHILDREN[1].children[0].children[1].text,
-                url: $CHILDREN[0].children[0].children[1].children[0].children[0].children[0].href
-            } |
-            # null이 아닌 항목만 필터링
-            if .version != null and .url != null then
-                # dialog (Tag, Item) 형식으로 출력
-                .version,
-                (.url | @json)
-            else
-                empty
-            end
-        ' | head -n 30 # 상위 15개 버전 (15 * 2줄 = 30줄)
+        paste <(echo "$VERSIONS_TEXT") <(echo "$URLS_LIST") |
+        awk -F'\t' '{ print $1; print $2 }' | # $1=Tag(버전), $2=Item(URL)
+        head -n 30 # 상위 15개 버전 (15 * 2줄 = 30줄)
     )
-    # --- [END] JQ/PUP FIX ---
+    # --- [END] JQ/PUP FIX 10 ---
 
     if [ ${#VERSIONS_LIST[@]} -eq 0 ]; then
         echo -e "${RED}[ERROR] Failed to fetch version list. (Scraper may be broken)${NC}"
         exit 1
     fi
 
-    local SELECTED_URL_JSON
-    if ! SELECTED_URL_JSON=$(
+    local SELECTED_URL
+    if ! SELECTED_URL=$(
         "${DIALOG[@]}" \
             --title "| Version Selection |" \
             --menu "Select the desired version" -1 -1 0 \
@@ -113,13 +109,13 @@ choose_version() {
     fi
     
     # 사용자가 null을 선택했는지 확인
-    if [ -z "$SELECTED_URL_JSON" ] || [ "$SELECTED_URL_JSON" == "null" ]; then
+    if [ -z "$SELECTED_URL" ] || [ "$SELECTED_URL" == "null" ]; then
         echo -e "${RED}[ERROR] Invalid selection. (Selected item was null)${NC}"
         return 1
     fi
     
-    APP_DL_URL="https://www.apkmirror.com$(jq -r . <<< "$SELECTED_URL_JSON")"
-    APP_VER=$(jq -r . <<< "$SELECTED_URL_JSON" | cut -d '/' -f 6 | sed 's/kakaotalk-//; s/-release//')
+    APP_DL_URL="https://www.apkmirror.com$SELECTED_URL"
+    APP_VER=$(echo "$SELECTED_URL" | cut -d '/' -f 6 | sed 's/kakaotalk-//; s/-release//')
     
     echo -e "${GREEN}[SELECTED] Version: $APP_VER${NC}"
 }
@@ -131,13 +127,11 @@ scrape_download_link() {
     
     PAGE1=$("${CURL[@]}" -A "$USER_AGENT" "$APP_DL_URL")
 
-    # `Revancify` (download.sh) 원본 로직
     readarray -t VARIANT_INFO < <(
         pup -p --charset utf-8 'div.variants-table json{}' <<< "$PAGE1" |
             jq -r \
                 --arg ARCH "$ARCH" \
-                --arg DPI "$DPI" \
-                --arg APP_FORMAT "BUNDLE" '
+                --arg DPI "$DPI" '
                 [
                     .[].children[1:][].children |
                     if (.[1].text | test("universal|noarch|\($ARCH)")) and
@@ -147,7 +141,7 @@ scrape_download_link() {
                        )
                     then .[0].children else empty end
                 ] |
-                (.[[] | if (.[1].text == $APP_FORMAT) then .[0].href else empty end][-1]) // (.[[] | .[0].href][-1])
+                (.[[] | if (.[1].text == "BUNDLE") then .[0].href else empty end][-1]) // (.[[] | .[0].href][-1])
             '
     )
     
@@ -190,7 +184,6 @@ download_and_merge() {
     local TEMP_DIR="$BASE_DIR/mod_temp_merge"
     rm -rf "$TEMP_DIR" && mkdir -p "$TEMP_DIR"
     
-    # `Revancify` (antisplit.sh) 원본 로직
     unzip -qqo "$APKM_FILE" \
         "base.apk" \
         "split_config.${ARCH_APK}_v8a.apk" \
@@ -225,7 +218,6 @@ run_patch() {
     echo -e "\n${GREEN}========= Running Patch Script =========${NC}"
     cd "$PATCH_SCRIPT_DIR"
     
-    # `Revancify` (patch.sh) 원본 로직
     ./build.py \
         --apk "$MERGED_APK_PATH" \
         --package "$PKG_NAME" \
