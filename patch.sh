@@ -1,7 +1,6 @@
 #!/bin/bash
 #
 # APKM Version Selector + Auto-Merger + Auto-Patcher (for revanced-build-script)
-# (Based on Revancify's version.sh logic)
 #
 set -e # Exit immediately if a command exits with a non-zero status.
 
@@ -74,23 +73,22 @@ choose_version() {
     local PAGE_CONTENTS
     PAGE_CONTENTS=$("${CURL[@]}" -A "$USER_AGENT" "https://www.apkmirror.com/uploads/?appcategory=$APKMIRROR_APP_NAME")
 
-    # --- [START] JQ/PUP FIX 9 (Based on user-provided version.sh) ---
-    # `null` 오류 해결을 위해, 사용자가 제공한 'version.sh'의
-    # `pup` 선택자와 `jq` 경로를 정확히 적용합니다.
+    # --- [START] JQ/PUP FIX 9 ---
+    # `pup` 선택자를 APKMirror의 'appRow' 구조에 맞게 수정합니다.
+    # 각 'appRow'에서 버전 텍스트와 URL을 추출합니다.
+    
+    local VERSIONS_TEXT URLS_LIST
+    # 버전 텍스트를 포함하는 'span.appVersion'을 정확히 타겟팅
+    VERSIONS_TEXT=$(pup -c 'div.listWidget .appRow > a > div > span.appVersion' <<< "$PAGE_CONTENTS" | pup 'text{}')
+    # 버전 링크를 포함하는 'a' 태그를 정확히 타겟팅
+    URLS_LIST=$(pup -c 'div.listWidget .appRow > a' <<< "$PAGE_CONTENTS" | pup 'attr{href}')
+
+    # `paste`를 사용하여 두 리스트를 탭(\t)으로 병합하고,
+    # `awk`를 사용하여 dialog 형식(Tag, Item)으로 변환
     readarray -t VERSIONS_LIST < <(
-        pup -c 'div.widget_appmanager_recentpostswidget div.listWidget div:not([class]) json{}' <<< "$PAGE_CONTENTS" |
-            jq -rc '
-            .[] | .children as $CHILDREN |
-            {
-                # version.sh의 정확한 버전 텍스트 경로
-                version: $CHILDREN[1].children[0].children[1].text,
-                # version.sh의 정확한 URL 경로
-                url: $CHILDREN[0].children[0].children[1].children[0].children[0].children[0].href
-            } |
-            # dialog (Tag, Item) 형식으로 출력
-            .version,
-            (.url | @json)
-        ' | head -n 30 # 상위 15개 버전 (15 * 2줄 = 30줄)
+        paste <(echo "$VERSIONS_TEXT") <(echo "$URLS_LIST") |
+        awk -F'\t' '{ print $1; print $2 }' |
+        head -n 30 # 상위 15개 버전 (15 * 2줄 = 30줄)
     )
     # --- [END] JQ/PUP FIX 9 ---
 
@@ -99,8 +97,8 @@ choose_version() {
         exit 1
     fi
 
-    local SELECTED_URL_JSON
-    if ! SELECTED_URL_JSON=$(
+    local SELECTED_URL
+    if ! SELECTED_URL=$(
         "${DIALOG[@]}" \
             --title "| Version Selection |" \
             --menu "Select the desired version" -1 -1 0 \
@@ -111,18 +109,18 @@ choose_version() {
     fi
     
     # 사용자가 null을 선택했는지 확인
-    if [ -z "$SELECTED_URL_JSON" ] || [ "$SELECTED_URL_JSON" == "null" ]; then
+    if [ -z "$SELECTED_URL" ] || [ "$SELECTED_URL" == "null" ]; then
         echo -e "${RED}[ERROR] Invalid selection. (Selected item was null)${NC}"
         return 1
     fi
     
-    APP_DL_URL="https://www.apkmirror.com$(jq -r . <<< "$SELECTED_URL_JSON")"
-    APP_VER=$(jq -r . <<< "$SELECTED_URL_JSON" | cut -d '/' -f 6 | sed 's/kakaotalk-//; s/-release//')
+    APP_DL_URL="https://www.apkmirror.com$SELECTED_URL"
+    APP_VER=$(echo "$SELECTED_URL" | cut -d '/' -f 6 | sed 's/kakaotalk-//; s/-release//')
     
     echo -e "${GREEN}[SELECTED] Version: $APP_VER${NC}"
 }
 
-# --- 4. Automatic Download Link Scraper (Based on download.sh) ---
+# --- 4. Automatic Download Link Scraper ---
 scrape_download_link() {
     echo -e "\n${BLUE}[INFO] 1/3: Analyzing version page...${NC}"
     local PAGE1 PAGE2 URL1 URL2 URL3 VARIANT_INFO
@@ -171,7 +169,7 @@ scrape_download_link() {
     echo -e "${GREEN}[SUCCESS] Download link acquired!${NC}"
 }
 
-# --- 5. Download & Merge (Based on antisplit.sh) ---
+# --- 5. Download & Merge ---
 download_and_merge() {
     echo -e "\n${BLUE}[INFO] Downloading file: $APP_NAME-$APP_VER.apkm${NC}"
     rm -f "$APKM_FILE"
