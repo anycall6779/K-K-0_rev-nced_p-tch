@@ -73,6 +73,9 @@ choose_version() {
     local PAGE_CONTENTS
     PAGE_CONTENTS=$("${CURL[@]}" -A "$USER_AGENT" "https://www.apkmirror.com/uploads/?appcategory=$APKMIRROR_APP_NAME")
 
+    # --- [START] JQ SYNTAX FIX ---
+    # `jq`가 dialog의 (Tag, Item) 쌍을 올바르게 생성하도록 수정합니다.
+    # 각 쌍은 별도의 줄에 출력되어야 합니다.
     readarray -t VERSIONS_LIST < <(
         pup -c 'div.listWidget div:not([class]) json{}' <<< "$PAGE_CONTENTS" |
             jq -rc '
@@ -81,9 +84,12 @@ choose_version() {
                 version: $CHILDREN[1].children[0].children[1].text,
                 url: $CHILDREN[0].children[0].children[1].children[0].children[0].children[0].href
             } |
-            "\(.version)" "\( .url | @json )"
-        ' | head -n 30
+            # 출력: 1. 버전 텍스트 (Tag), 2. URL (Item)
+            .version,
+            (.url | @json)
+        ' | head -n 30 # 상위 15개 버전 (15 * 2줄 = 30줄)
     )
+    # --- [END] JQ SYNTAX FIX ---
 
     if [ ${#VERSIONS_LIST[@]} -eq 0 ]; then
         echo -e "${RED}[ERROR] Failed to fetch version list.${NC}"
