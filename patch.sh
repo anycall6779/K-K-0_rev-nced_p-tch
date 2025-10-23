@@ -1,6 +1,7 @@
 #!/bin/bash
 #
 # APKM Version Selector + Auto-Merger + Auto-Patcher (for revanced-build-script)
+# (Based on Revancify's version.sh logic)
 #
 set -e # Exit immediately if a command exits with a non-zero status.
 
@@ -73,24 +74,25 @@ choose_version() {
     local PAGE_CONTENTS
     PAGE_CONTENTS=$("${CURL[@]}" -A "$USER_AGENT" "https://www.apkmirror.com/uploads/?appcategory=$APKMIRROR_APP_NAME")
 
-    # --- [START] JQ SYNTAX FIX 7 ---
-    # `null` 오류 해결을 위해 복잡한 children 경로 대신,
-    # `pup`가 제공하는 최상위 'text' 필드를 사용합니다.
+    # --- [START] JQ/PUP FIX 9 (Based on user-provided version.sh) ---
+    # `null` 오류 해결을 위해, 사용자가 제공한 'version.sh'의
+    # `pup` 선택자와 `jq` 경로를 정확히 적용합니다.
     readarray -t VERSIONS_LIST < <(
-        pup -c 'div.listWidget a.fontBlack json{}' <<< "$PAGE_CONTENTS" |
+        pup -c 'div.widget_appmanager_recentpostswidget div.listWidget div:not([class]) json{}' <<< "$PAGE_CONTENTS" |
             jq -rc '
-            .[] | # pup가 반환하는 배열의 각 항목을 순회
+            .[] | .children as $CHILDREN |
             {
-                # .children[...] 대신 최상위 .text 사용
-                "version": .text,
-                "url": .href
+                # version.sh의 정확한 버전 텍스트 경로
+                version: $CHILDREN[1].children[0].children[1].text,
+                # version.sh의 정확한 URL 경로
+                url: $CHILDREN[0].children[0].children[1].children[0].children[0].children[0].href
             } |
             # dialog (Tag, Item) 형식으로 출력
             .version,
             (.url | @json)
         ' | head -n 30 # 상위 15개 버전 (15 * 2줄 = 30줄)
     )
-    # --- [END] JQ SYNTAX FIX 7 ---
+    # --- [END] JQ/PUP FIX 9 ---
 
     if [ ${#VERSIONS_LIST[@]} -eq 0 ]; then
         echo -e "${RED}[ERROR] Failed to fetch version list. (Scraper may be broken)${NC}"
@@ -120,7 +122,7 @@ choose_version() {
     echo -e "${GREEN}[SELECTED] Version: $APP_VER${NC}"
 }
 
-# --- 4. Automatic Download Link Scraper ---
+# --- 4. Automatic Download Link Scraper (Based on download.sh) ---
 scrape_download_link() {
     echo -e "\n${BLUE}[INFO] 1/3: Analyzing version page...${NC}"
     local PAGE1 PAGE2 URL1 URL2 URL3 VARIANT_INFO
@@ -169,7 +171,7 @@ scrape_download_link() {
     echo -e "${GREEN}[SUCCESS] Download link acquired!${NC}"
 }
 
-# --- 5. Download & Merge ---
+# --- 5. Download & Merge (Based on antisplit.sh) ---
 download_and_merge() {
     echo -e "\n${BLUE}[INFO] Downloading file: $APP_NAME-$APP_VER.apkm${NC}"
     rm -f "$APKM_FILE"
