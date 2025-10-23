@@ -73,32 +73,36 @@ choose_version() {
     local PAGE_CONTENTS
     PAGE_CONTENTS=$("${CURL[@]}" -A "$USER_AGENT" "https://www.apkmirror.com/uploads/?appcategory=$APKMIRROR_APP_NAME")
 
-    # --- [START] JQ/PUP FIX 9 ---
-    # `pup` 선택자를 APKMirror의 'appRow' 구조에 맞게 수정합니다.
-    # 각 'appRow'에서 버전 텍스트와 URL을 추출합니다.
-    
-    local VERSIONS_TEXT URLS_LIST
-    # 버전 텍스트를 포함하는 'span.appVersion'을 정확히 타겟팅
-    VERSIONS_TEXT=$(pup -c 'div.listWidget .appRow > a > div > span.appVersion' <<< "$PAGE_CONTENTS" | pup 'text{}')
-    # 버전 링크를 포함하는 'a' 태그를 정확히 타겟팅
-    URLS_LIST=$(pup -c 'div.listWidget .appRow > a' <<< "$PAGE_CONTENTS" | pup 'attr{href}')
-
-    # `paste`를 사용하여 두 리스트를 탭(\t)으로 병합하고,
-    # `awk`를 사용하여 dialog 형식(Tag, Item)으로 변환
+    # --- [START] JQ/PUP FIX 10 ---
+    # `Revancify` 원본 'version.sh'의 선택자 로직을 복원합니다.
+    # 이것이 가장 정확한 HTML 경로일 것입니다.
     readarray -t VERSIONS_LIST < <(
-        paste <(echo "$VERSIONS_TEXT") <(echo "$URLS_LIST") |
-        awk -F'\t' '{ print $1; print $2 }' |
-        head -n 30 # 상위 15개 버전 (15 * 2줄 = 30줄)
+        pup -c 'div.widget_appmanager_recentpostswidget div.listWidget div:not([class]) json{}' <<< "$PAGE_CONTENTS" |
+            jq -rc '
+            .[] | .children as $CHILDREN | # pup가 반환하는 배열의 각 항목을 순회
+            {
+                # Revancify 원본 스니펫의 경로
+                version: $CHILDREN[1].children[0].children[1].text,
+                url: $CHILDREN[0].children[0].children[1].children[0].children[0].children[0].href
+            } |
+            # null이 아닌 항목만 필터링
+            if .version != null and .url != null then
+                .version,
+                (.url | @json)
+            else
+                empty
+            end
+        ' | head -n 30 # 상위 15개 버전 (15 * 2줄 = 30줄)
     )
-    # --- [END] JQ/PUP FIX 9 ---
+    # --- [END] JQ/PUP FIX 10 ---
 
     if [ ${#VERSIONS_LIST[@]} -eq 0 ]; then
         echo -e "${RED}[ERROR] Failed to fetch version list. (Scraper may be broken)${NC}"
         exit 1
     fi
 
-    local SELECTED_URL
-    if ! SELECTED_URL=$(
+    local SELECTED_URL_JSON
+    if ! SELECTED_URL_JSON=$(
         "${DIALOG[@]}" \
             --title "| Version Selection |" \
             --menu "Select the desired version" -1 -1 0 \
@@ -109,13 +113,13 @@ choose_version() {
     fi
     
     # 사용자가 null을 선택했는지 확인
-    if [ -z "$SELECTED_URL" ] || [ "$SELECTED_URL" == "null" ]; then
+    if [ -z "$SELECTED_URL_JSON" ] || [ "$SELECTED_URL_JSON" == "null" ]; then
         echo -e "${RED}[ERROR] Invalid selection. (Selected item was null)${NC}"
         return 1
     fi
     
-    APP_DL_URL="https://www.apkmirror.com$SELECTED_URL"
-    APP_VER=$(echo "$SELECTED_URL" | cut -d '/' -f 6 | sed 's/kakaotalk-//; s/-release//')
+    APP_DL_URL="https://www.apkmirror.com$(jq -r . <<< "$SELECTED_URL_JSON")"
+    APP_VER=$(jq -r . <<< "$SELECTED_URL_JSON" | cut -d '/' -f 6 | sed 's/kakaotalk-//; s/-release//')
     
     echo -e "${GREEN}[SELECTED] Version: $APP_VER${NC}"
 }
