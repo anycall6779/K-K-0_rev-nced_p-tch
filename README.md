@@ -51,3 +51,5 @@ Final code wirte this is
 curl -o patch_fixed.sh https://raw.githubusercontent.com/anycall6779/K-K-0_rev-nced_p-tch/refs/heads/main/patch.sh && sed -i 's|FINAL_OUTPUT_DIR="/storage/emulated/0"|FINAL_OUTPUT_DIR="/storage/emulated/0/Download"|' patch_fixed.sh && bash patch_fixed.sh
 ```
 
+
+```mv ~/revanced-build-script/output/patched.apk /sdcard/Download/``'
