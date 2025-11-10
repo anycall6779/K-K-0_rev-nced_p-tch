@@ -138,6 +138,7 @@ run_patch() {
     cd "$PATCH_SCRIPT_DIR"
     rm -rf output out
     
+    print_info "build.py 실행 중..."
     # python3 대신 python 사용
     python build.py \
         --apk "$MERGED_APK_PATH" \
