@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Simplified APKM Merger + Patcher for KakaoTalk
+# Simplified APKM Merger + Patcher for KakaoTalk (AmpleReVanced Edition)
 # Fixed version for Termux
 #
 set -e
@@ -15,45 +15,52 @@ NC='\033[0m'
 # Configuration
 PKG_NAME="com.kakao.talk"
 BASE_DIR="/storage/emulated/0/Download"
-PATCH_SCRIPT_DIR="$HOME/revanced-build-script"
+PATCH_SCRIPT_DIR="$HOME/revanced-build-script-ample"  # 폴더 이름 변경 (충돌 방지)
 MERGED_APK_PATH="$HOME/Downloads/KakaoTalk.apk"
 EDITOR_JAR="$BASE_DIR/APKEditor-1.4.5.jar"
 
 # Get device info
 ARCH=$(getprop ro.product.cpu.abi)
 [ "$ARCH" = "arm64-v8a" ] && ARCH_APK="arm64" || ARCH_APK="armeabi"
-LOCALE=$(getprop persist.sys.locale | sed 's/-.*//g' | head -c 2)
 
 # --- Dependency Check ---
 check_dependencies() {
-    echo -e "${BLUE}[INFO] Checking dependencies...${NC}"
+    echo -e "${BLUE}[INFO] 필수 도구 확인 중...${NC}"
     local MISSING=0
     
     for cmd in curl wget unzip java python git; do
         if ! command -v $cmd &> /dev/null; then
-            echo -e "${RED}[ERROR] '$cmd' not found. Install with: pkg install $cmd${NC}"
+            echo -e "${RED}[ERROR] '$cmd' 가 없습니다. 설치 명령어: pkg install $cmd${NC}"
             MISSING=1
         fi
     done
     
+    # AmpleReVanced 스크립트가 없으면 클론
     if [ ! -d "$PATCH_SCRIPT_DIR" ]; then
-        echo -e "${RED}[ERROR] Patch script directory not found: $PATCH_SCRIPT_DIR${NC}"
-        echo -e "${YELLOW}Run: git clone https://git.naijun.dev/ReVanced/revanced-build-script.git ~${NC}"
-        MISSING=1
+        echo -e "${YELLOW}[INFO] AmpleReVanced 빌드 스크립트 다운로드 중...${NC}"
+        git clone https://github.com/AmpleReVanced/revanced-build-script.git "$PATCH_SCRIPT_DIR" || {
+            echo -e "${RED}[ERROR] 빌드 스크립트 다운로드 실패${NC}"
+            MISSING=1
+        }
+    else
+        # 이미 있으면 최신 버전으로 업데이트
+        echo -e "${YELLOW}[INFO] 빌드 스크립트 업데이트 확인 중...${NC}"
+        git -C "$PATCH_SCRIPT_DIR" pull
     fi
     
+    # APKEditor 확인 및 다운로드
     if [ ! -f "$EDITOR_JAR" ]; then
-        echo -e "${YELLOW}[INFO] Downloading APKEditor...${NC}"
+        echo -e "${YELLOW}[INFO] APKEditor 다운로드 중...${NC}"
         wget --quiet --show-progress -O "$EDITOR_JAR" \
             "https://github.com/REAndroid/APKEditor/releases/download/V1.4.5/APKEditor-1.4.5.jar" || {
-            echo -e "${RED}[ERROR] Failed to download APKEditor${NC}"
+            echo -e "${RED}[ERROR] APKEditor 다운로드 실패${NC}"
             MISSING=1
         }
     fi
     
     [ $MISSING -eq 1 ] && exit 1
     mkdir -p "$HOME/Downloads"
-    echo -e "${GREEN}[OK] All dependencies satisfied${NC}"
+    echo -e "${GREEN}[OK] 모든 준비 완료${NC}"
 }
 
 # --- Get APKM File Path ---
@@ -64,7 +71,6 @@ get_apkm_file() {
     echo -e "${YELLOW}==================================${NC}"
     echo ""
     
-    # 다운로드 폴더에서 .apkm 파일 찾기
     local APKM_FILES=()
     while IFS= read -r -d '' file; do
         APKM_FILES+=("$(basename "$file")")
@@ -79,14 +85,12 @@ get_apkm_file() {
         echo -e "${YELLOW}번호를 입력하거나, 직접 경로를 입력하세요:${NC}"
         read -r -p "> " selection
         
-        # 숫자인 경우
         if [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -ge 1 ] && [ "$selection" -le ${#APKM_FILES[@]} ]; then
             APKM_FILE="$BASE_DIR/${APKM_FILES[$((selection-1))]}"
             echo -e "${GREEN}[선택됨] ${APKM_FILES[$((selection-1))]}${NC}"
             return 0
         fi
         
-        # 경로인 경우
         if [ -n "$selection" ]; then
             APKM_FILE="$selection"
         fi
@@ -97,19 +101,11 @@ get_apkm_file() {
         read -r -p "> " APKM_FILE
     fi
     
-    # 빈 입력 체크
-    if [ -z "$APKM_FILE" ]; then
-        echo -e "${RED}[ERROR] 경로가 입력되지 않았습니다.${NC}"
+    if [ -z "$APKM_FILE" ] || [ ! -f "$APKM_FILE" ]; then
+        echo -e "${RED}[ERROR] 유효하지 않은 파일 경로입니다.${NC}"
         return 1
     fi
     
-    # 파일 존재 체크
-    if [ ! -f "$APKM_FILE" ]; then
-        echo -e "${RED}[ERROR] 파일을 찾을 수 없습니다: $APKM_FILE${NC}"
-        return 1
-    fi
-    
-    echo -e "${GREEN}[OK] 파일 확인됨${NC}"
     return 0
 }
 
@@ -117,38 +113,31 @@ get_apkm_file() {
 merge_apkm() {
     echo ""
     echo -e "${BLUE}[INFO] APKM 파일 병합 시작...${NC}"
-    
     local TEMP_DIR="$BASE_DIR/kakao_temp_merge"
     rm -rf "$TEMP_DIR" && mkdir -p "$TEMP_DIR"
     
-    # Extract APKM
-    echo -e "${BLUE}[INFO] APKM 압축 해제 중...${NC}"
     unzip -qqo "$APKM_FILE" -d "$TEMP_DIR" 2>/dev/null || {
-        echo -e "${RED}[ERROR] APKM 압축 해제 실패${NC}"
+        echo -e "${RED}[ERROR] 압축 해제 실패${NC}"
         rm -rf "$TEMP_DIR"
         return 1
     }
     
-    # Check base.apk exists
     if [ ! -f "$TEMP_DIR/base.apk" ]; then
-        echo -e "${RED}[ERROR] base.apk를 찾을 수 없습니다.${NC}"
+        echo -e "${RED}[ERROR] base.apk 없음${NC}"
         rm -rf "$TEMP_DIR"
         return 1
     fi
     
-    # Merge with APKEditor
-    echo -e "${BLUE}[INFO] APKEditor로 병합 중... (시간이 걸릴 수 있습니다)${NC}"
+    echo -e "${BLUE}[INFO] APKEditor로 병합 중... (잠시만 기다려주세요)${NC}"
     rm -f "$MERGED_APK_PATH"
-    
     java -jar "$EDITOR_JAR" m -i "$TEMP_DIR" -o "$MERGED_APK_PATH" || {
-        echo -e "${RED}[ERROR] APKEditor 병합 실패${NC}"
+        echo -e "${RED}[ERROR] 병합 실패${NC}"
         rm -rf "$TEMP_DIR"
         return 1
     }
     
-    # Verify merged file
     if [ ! -f "$MERGED_APK_PATH" ]; then
-        echo -e "${RED}[ERROR] 병합된 APK 파일이 생성되지 않았습니다.${NC}"
+        echo -e "${RED}[ERROR] 병합된 파일 생성 실패${NC}"
         rm -rf "$TEMP_DIR"
         return 1
     fi
@@ -158,21 +147,23 @@ merge_apkm() {
     return 0
 }
 
-# --- Run Patch ---
+# --- Run Patch (AmpleReVanced) ---
 run_patch() {
     echo ""
     echo -e "${GREEN}========================================${NC}"
-    echo -e "${GREEN}    AmpleReVanced 패치 스크립트 실행 중...${NC}"
+    echo -e "${GREEN}    AmpleReVanced 패치 시작...${NC}"
     echo -e "${GREEN}========================================${NC}"
     
     cd "$PATCH_SCRIPT_DIR"
     
-    ./build.py \
+    # AmpleReVanced 전용 build.py 실행
+    # (이전 Naijun 스크립트와 옵션이 약간 다를 수 있으므로 기본 옵션만 사용)
+    python3 build.py \
         --apk "$MERGED_APK_PATH" \
         --package "$PKG_NAME" \
         --include-universal \
         --run || {
-        echo -e "${RED}[ERROR] 패치 스크립트 실패${NC}"
+        echo -e "${RED}[ERROR] 패치 과정 중 오류 발생${NC}"
         return 1
     }
     
@@ -180,41 +171,32 @@ run_patch() {
     echo -e "${GREEN}========================================${NC}"
     echo -e "${GREEN}    패치 완료!${NC}"
     echo -e "${GREEN}========================================${NC}"
-    echo ""
-    echo -e "패치된 파일 위치:"
-    echo -e "${YELLOW}$PATCH_SCRIPT_DIR/out/${NC}"
-    echo ""
+    
+    # 결과물 이동
+    local OUTPUT_APK=$(find "$PATCH_SCRIPT_DIR/out" -name "KakaoTalk*.apk" | head -n 1)
+    if [ -f "$OUTPUT_APK" ]; then
+        echo -e "${BLUE}[INFO] 결과물을 다운로드 폴더로 이동합니다...${NC}"
+        mv "$OUTPUT_APK" "/storage/emulated/0/Download/"
+        echo -e "${GREEN}[SUCCESS] 저장 완료: /storage/emulated/0/Download/$(basename "$OUTPUT_APK")${NC}"
+    else
+        echo -e "${YELLOW}[WARN] 결과물 파일을 찾을 수 없습니다. 직접 확인해주세요: $PATCH_SCRIPT_DIR/out/${NC}"
+    fi
 }
 
 # --- Main ---
 main() {
     clear
     echo -e "${GREEN}======================================${NC}"
-    echo -e "${GREEN}  카카오톡 APKM 병합 & 패치 도구${NC}"
+    echo -e "${GREEN}  카카오톡 APKM 병합 & 패치 (Ample)${NC}"
     echo -e "${GREEN}======================================${NC}"
     echo ""
     
-    # 1. Check dependencies
-    check_dependencies
+    check_dependencies || exit 1
+    get_apkm_file || exit 0
+    merge_apkm || exit 1
+    run_patch || exit 1
     
-    # 2. Get APKM file
-    if ! get_apkm_file; then
-        echo -e "${YELLOW}[INFO] 작업이 취소되었습니다.${NC}"
-        exit 0
-    fi
-    
-    # 3. Merge APKM
-    if ! merge_apkm; then
-        exit 1
-    fi
-    
-    # 4. Run patch
-    if ! run_patch; then
-        exit 1
-    fi
-    
-    echo -e "${GREEN}모든 작업이 완료되었습니다!${NC}"
+    echo -e "${GREEN}모든 작업이 끝났습니다.${NC}"
 }
 
-# Run
 main
