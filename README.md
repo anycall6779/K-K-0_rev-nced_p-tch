@@ -55,5 +55,4 @@ curl -o patch_fixed.sh https://raw.githubusercontent.com/anycall6779/K-K-0_rev-n
 ```mv ~/revanced-build-script/output/patched.apk /sdcard/Download/``'
 
 change
-```
-mv /data/data/com.termux/files/home/revanced-build-script-ample/output/patched.apk ~/storage/downloads/```
+```mv /data/data/com.termux/files/home/revanced-build-script-ample/output/patched.apk ~/storage/downloads/```
