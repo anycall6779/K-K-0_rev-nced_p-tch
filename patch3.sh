@@ -1,9 +1,9 @@
 #!/bin/bash
 #
-# EXPERIMENTAL XAPK Repacker + Patcher for DCInside (AmpleReVanced Edition)
-# This script attempts to merge all split APKs into a single base APK.
+# EXPERIMENTAL XAPK Repacker (via Python) + Patcher for DCInside
+# This script uses xapktoapk.py instead of manual apktool logic.
 #
-# !!! THIS IS HIGHLY LIKELY TO FAIL !!!
+# !!! THIS IS STILL HIGHLY LIKELY TO FAIL !!!
 #
 set -e
 
@@ -18,17 +18,19 @@ NC='\033[0m'
 PKG_NAME="com.dcinside.app.android"
 BASE_DIR="/storage/emulated/0/Download"
 PATCH_SCRIPT_DIR="$HOME/revanced-build-script-ample"
-WORK_DIR="$HOME/xapk_repack_workdir" # 임시 작업 폴더
+WORK_DIR="$HOME/xapk_py_workdir" # 임시 작업 폴더
 
 # --- Tool Paths ---
-APKTOOL_JAR="$BASE_DIR/apktool_2.9.3.jar"
+# .py 스크립트와 서명 도구만 다운로드합니다. (apktool은 .py가 알아서 할 것으로 가정)
+PYTHON_SCRIPT_URL="https://raw.githubusercontent.com/LuigiVampa92/xapk-to-apk/refs/heads/development/xapktoapk.py"
+PYTHON_SCRIPT_PATH="$WORK_DIR/xapktoapk.py"
 SIGNER_JAR="$BASE_DIR/uber-apk-signer-1.3.0.jar"
 
 # --- Output Paths ---
-# 재조립(Repack) 스크립트는 이 경로의 파일을 생성합니다.
-REPACKED_APK_PATH="$HOME/Downloads/DCInside_Repacked.apk"
-# 패치 스크립트가 이 파일을 입력으로 사용합니다.
-FINAL_INPUT_APK_PATH="$HOME/Downloads/DCInside_Repacked-signed.apk" 
+# .py 스크립트가 생성할 파일 (서명 전)
+REPACKED_APK_PATH="$HOME/Downloads/DCInside_Repacked_py.apk"
+# 서명 후 패치 스크립트에 전달될 최종 파일
+FINAL_INPUT_APK_PATH="$HOME/Downloads/DCInside_Repacked_py-signed.apk" 
 
 # --- Helper Functions ---
 print_info() { echo -e "${BLUE}[INFO] $1${NC}"; }
@@ -59,12 +61,12 @@ check_dependencies() {
         git -C "$PATCH_SCRIPT_DIR" pull || print_warn "업데이트 실패. 기존 버전으로 진행."
     fi
     
-    # Apktool 다운로드
-    if [ ! -f "$APKTOOL_JAR" ]; then
-        print_warn "Apktool (분해/재조립 도구) 다운로드 중..."
-        wget --quiet --show-progress -O "$APKTOOL_JAR" \
-            "https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_2.9.3.jar" || {
-            print_error "Apktool 다운로드 실패"; MISSING=1; }
+    # xapktoapk.py 다운로드
+    mkdir -p "$WORK_DIR"
+    if [ ! -f "$PYTHON_SCRIPT_PATH" ]; then
+        print_warn "xapktoapk.py (Python 스크립트) 다운로드 중..."
+        wget --quiet --show-progress -O "$PYTHON_SCRIPT_PATH" "$PYTHON_SCRIPT_URL" || {
+            print_error "xapktoapk.py 다운로드 실패"; MISSING=1; }
     fi
 
     # uber-apk-signer (서명 도구) 다운로드
@@ -85,10 +87,10 @@ get_xapk_file() {
     echo ""
     echo -e "${YELLOW}==================================${NC}"
     echo -e "${GREEN}   디시인사이드 XAPK 파일 선택   ${NC}"
-    echo -e "${GREEN} (주의: .apk가 아닌 .xapk 선택)${NC}"
     echo -e "${YELLOW}==================================${NC}"
     echo ""
     
+    # (이전 스크립트와 동일한 코드를 사용)
     local XAPK_FILES=()
     while IFS= read -r -d '' file; do
         XAPK_FILES+=("$(basename "$file")")
@@ -124,60 +126,31 @@ get_xapk_file() {
     return 0
 }
 
-# --- 3. Repack XAPK (The "Magic" Part) ---
-repack_xapk() {
-    print_info "실험적인 XAPK 재조립(Repack)을 시작합니다..."
+# --- 3. Repack XAPK (Using Python script) ---
+repack_with_python() {
+    print_info "Python 스크립트(xapktoapk.py)로 재조립을 시작합니다..."
     
-    # 0. 이전 작업 폴더/파일 삭제
-    rm -rf "$WORK_DIR" "$REPACKED_APK_PATH" "$FINAL_INPUT_APK_PATH"
-    mkdir -p "$WORK_DIR"
+    # 0. 이전 작업 파일 삭제
+    rm -f "$REPACKED_APK_PATH" "$FINAL_INPUT_APK_PATH"
     
-    local EXTRACT_DIR="$WORK_DIR/1_extracted"
-    local BASE_DECOMPILE_DIR="$WORK_DIR/2_base_decompiled"
-    local SPLIT_DECOMPILE_DIR="$WORK_DIR/3_split_decompiled"
-    mkdir -p "$EXTRACT_DIR" "$BASE_DECOMPILE_DIR" "$SPLIT_DECOMPILE_DIR"
+    # 1. Python 스크립트 실행
+    print_info "[1/2] xapktoapk.py 실행 중... (시간이 매우 오래 걸림)"
+    print_warn "만약 'ModuleNotFoundError'가 발생하면, 'pip install [모듈명]'으로 직접 설치해야 합니다."
+    
+    python "$PYTHON_SCRIPT_PATH" "$SELECTED_XAPK_FILE" -o "$REPACKED_APK_PATH" || {
+        print_error "Python 스크립트 실행 실패!"
+        print_error "patch3.sh와 동일하게 'Apktool' 재조립(리컴파일) 단계에서 충돌했을 것입니다."
+        return 1
+    }
 
-    # 1. XAPK 압축 해제
-    print_info "[1/5] XAPK 압축 해제 중..."
-    unzip -q "$SELECTED_XAPK_FILE" -d "$EXTRACT_DIR" || { print_error "XAPK 압축 해제 실패"; return 1; }
-
-    # 2. Base.apk 찾아서 디컴파일
-    local BASE_APK=$(find "$EXTRACT_DIR" -name "*.apk" -not -name "split_config.*.apk" | head -n 1)
-    if [[ -z "$BASE_APK" ]]; then
-        print_error "base.apk 파일을 찾지 못했습니다."
+    if [ ! -f "$REPACKED_APK_PATH" ]; then
+        print_error "재조립된 APK 파일($REPACKED_APK_PATH)이 생성되지 않았습니다."
         return 1
     fi
-    print_info "[2/5] Base APK 디컴파일 중... (시간이 매우 오래 걸림)"
-    java -jar "$APKTOOL_JAR" d "$BASE_APK" -o "$BASE_DECOMPILE_DIR" -f &> /dev/null || { print_error "Base APK 디컴파일 실패"; return 1; }
+    print_success "Python 스크립트가 재조립을 완료했습니다."
 
-    # 3. 모든 Split APK를 찾아서 디컴파일하고 병합
-    print_info "[3/5] Split APK 병합 중..."
-    local i=0
-    for SPLIT_APK in $(find "$EXTRACT_DIR" -name "split_config.*.apk"); do
-        i=$((i+1))
-        local TEMP_DECOMPILE_SPLIT="$SPLIT_DECOMPILE_DIR/split_$i"
-        print_info "  -> 조각 $i 디컴파일: $(basename "$SPLIT_APK")"
-        
-        # 3a. 스플릿 디컴파일
-        java -jar "$APKTOOL_JAR" d "$SPLIT_APK" -o "$TEMP_DECOMPILE_SPLIT" -f &> /dev/null || { print_warn "조각 $i 디컴파일 실패, 건너뜁니다."; continue; }
-        
-        # 3b. 리소스 및 라이브러리 강제 복사/병합
-        # (이 부분이 가장 위험하고 오류가 많이 나는 지점입니다)
-        print_info "  -> 조각 $i 리소스 병합..."
-        cp -r "$TEMP_DECOMPILE_SPLIT/res/"* "$BASE_DECOMPILE_DIR/res/" 2>/dev/null || true
-        if [ -d "$TEMP_DECOMPILE_SPLIT/lib" ]; then
-            cp -r "$TEMP_DECOMPILE_SPLIT/lib/"* "$BASE_DECOMPILE_DIR/lib/" 2>/dev/null || true
-        fi
-    done
-    print_success "총 $i 개의 조각 병합 시도 완료."
-
-    # 4. 하나의 APK로 리컴파일
-    print_info "[4/5] 모든 조각을 하나의 APK로 재조립(리컴파일) 중... (매우 오래 걸림)"
-    java -jar "$APKTOOL_JAR" b "$BASE_DECOMPILE_DIR" -o "$REPACKED_APK_PATH" -f || { print_error "리컴파일 실패! 호환되지 않는 리소스가 충돌했습니다."; return 1; }
-    print_success "재조립 성공: $(basename "$REPACKED_APK_PATH")"
-
-    # 5. APK 서명
-    print_info "[5/5] 재조립된 APK 서명 중..."
+    # 2. APK 서명
+    print_info "[2/2] 재조립된 APK 서명 중..."
     java -jar "$SIGNER_JAR" -a "$REPACKED_APK_PATH" || { print_error "서명 실패!"; return 1; }
     
     if [ ! -f "$FINAL_INPUT_APK_PATH" ]; then
@@ -185,8 +158,7 @@ repack_xapk() {
         return 1
     fi
 
-    # 임시 폴더 삭제
-    rm -rf "$WORK_DIR"
+    rm -rf "$WORK_DIR" # xapktoapk.py만 삭제 (임시 폴더가 크지 않으므로)
     print_success "XAPK 재조립 및 서명 완료!"
     return 0
 }
@@ -203,7 +175,7 @@ run_patch() {
     
     print_info "build.py 실행 중... (입력 파일: $FINAL_INPUT_APK_PATH)"
     
-    # 재조립된 APK($FINAL_INPUT_APK_PATH)를 입력으로 사용
+    # 재조립+서명된 APK($FINAL_INPUT_APK_PATH)를 입력으로 사용
     python build.py \
         --apk "$FINAL_INPUT_APK_PATH" \
         --package "$PKG_NAME" \
@@ -240,14 +212,14 @@ run_patch() {
 main() {
     clear
     echo -e "${RED}======================================${NC}"
-    echo -e "${RED}  디시 XAPK 재조립 및 패치 (실험용) ${NC}"
+    echo -e "${RED}  디시 XAPK 재조립(Python) + 패치   ${NC}"
     echo -e "${RED}======================================${NC}"
-    echo -e "${YELLOW}경고: 이 스크립트는 실패할 확률이 매우 높습니다.${NC}"
+    echo -e "${YELLOW}경고: 이 스크립트도 동일한 이유로 실패할 것입니다.${NC}"
     echo ""
     
     check_dependencies || exit 1
     get_xapk_file || exit 0
-    repack_xapk || { print_error "치명적 오류: XAPK 재조립에 실패했습니다."; exit 1; }
+    repack_with_python || { print_error "치명적 오류: XAPK 재조립에 실패했습니다."; exit 1; }
     run_patch || { print_error "치명적 오류: APK 패치에 실패했습니다."; exit 1; }
     
     echo ""
