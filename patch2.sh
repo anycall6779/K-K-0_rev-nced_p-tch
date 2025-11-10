@@ -170,7 +170,6 @@ run_patch() {
     ./build.py \
         --apk "$MERGED_APK_PATH" \
         --package "$PKG_NAME" \
-        --source "ample" \
         --include-universal \
         --run || {
         echo -e "${RED}[ERROR] 패치 스크립트 실패${NC}"
