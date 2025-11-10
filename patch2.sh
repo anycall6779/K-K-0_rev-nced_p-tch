@@ -1,218 +1,221 @@
 #!/bin/bash
 #
-# APKM 병합 + ReVanced CLI 패치 스크립트 (RVP 파일 사용)
+# Simplified APKM Merger + Patcher for KakaoTalk
+# Fixed version for Termux
 #
-set -e # 오류 발생 시 즉시 중지
+set -e
 
-# --- 1. 기본 설정 및 변수 ---
-# 색상 코드
+# Color Codes
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# 앱 고정 정보
+# Configuration
 PKG_NAME="com.kakao.talk"
-
-# 경로 설정
-BASE_DIR="/storage/emulated/0/Download" # 작업 폴더
-FINAL_OUTPUT_DIR="/storage/emulated/0" # 최종 파일 출력 위치
-
-# 패치 도구 경로
+BASE_DIR="/storage/emulated/0/Download"
+PATCH_SCRIPT_DIR="$HOME/revanced-build-script"
+MERGED_APK_PATH="$HOME/Downloads/KakaoTalk.apk"
 EDITOR_JAR="$BASE_DIR/APKEditor-1.4.5.jar"
-CLI_JAR="$BASE_DIR/revanced-cli.jar" # ReVanced CLI
-RVP_FILE="$BASE_DIR/patches-ample.rvp" # Ample 패치 파일
-TEMP_MERGE_DIR="$BASE_DIR/temp_merge_dir"
 
-# 사용자가 제공한 RVP 파일 URL
-RVP_URL="https://github.com/AmpleReVanced/revanced-patches/releases/download/v5.45.0-ample.1/patches-5.45.0-ample.1.rvp"
+# Get device info
+ARCH=$(getprop ro.product.cpu.abi)
+[ "$ARCH" = "arm64-v8a" ] && ARCH_APK="arm64" || ARCH_APK="armeabi"
+LOCALE=$(getprop persist.sys.locale | sed 's/-.*//g' | head -c 2)
 
-# 패치 스크립트가 아닌, 병합된 APK가 저장될 위치
-MERGED_APK_PATH="$HOME/Downloads/KakaoTalk-merged.apk"
-
-# --- 2. 도구 확인 함수 ---
+# --- Dependency Check ---
 check_dependencies() {
     echo -e "${BLUE}[INFO] Checking dependencies...${NC}"
     local MISSING=0
-    # python, git 제외. java, unzip, wget만 필요.
-    for cmd in wget unzip java; do
+    
+    for cmd in curl wget unzip java python git; do
         if ! command -v $cmd &> /dev/null; then
-            echo -e "${RED}[ERROR] '$cmd' not found. Please run 'pkg install ${cmd}'${NC}"
+            echo -e "${RED}[ERROR] '$cmd' not found. Install with: pkg install $cmd${NC}"
             MISSING=1
         fi
     done
     
-    # 1. APKEditor (병합용)
+    if [ ! -d "$PATCH_SCRIPT_DIR" ]; then
+        echo -e "${RED}[ERROR] Patch script directory not found: $PATCH_SCRIPT_DIR${NC}"
+        echo -e "${YELLOW}Run: git clone https://git.naijun.dev/ReVanced/revanced-build-script.git ~${NC}"
+        MISSING=1
+    fi
+    
     if [ ! -f "$EDITOR_JAR" ]; then
-        echo -e "${YELLOW}[WARNING] $EDITOR_JAR not found. Downloading...${NC}"
-        wget -q --show-progress -O "$EDITOR_JAR" "https://github.com/REAndroid/APKEditor/releases/download/V1.4.5/APKEditor-1.4.5.jar" || {
-            echo -e "${RED}[ERROR] Failed to download APKEditor.${NC}"; MISSING=1;
+        echo -e "${YELLOW}[INFO] Downloading APKEditor...${NC}"
+        wget --quiet --show-progress -O "$EDITOR_JAR" \
+            "https://github.com/REAndroid/APKEditor/releases/download/V1.4.5/APKEditor-1.4.5.jar" || {
+            echo -e "${RED}[ERROR] Failed to download APKEditor${NC}"
+            MISSING=1
         }
     fi
     
-    # 2. ReVanced CLI (패치용)
-    if [ ! -f "$CLI_JAR" ]; then
-        echo -e "${YELLOW}[WARNING] $CLI_JAR not found. Downloading...${NC}"
-        # (ReVanced CLI의 공식 릴리즈 URL 예시, 필요시 변경)
-        wget -q --show-progress -O "$CLI_JAR" "https://github.com/revanced/revanced-cli/releases/download/v4.4.0/revanced-cli-4.4.0-all.jar" || {
-            echo -e "${RED}[ERROR] Failed to download ReVanced CLI.${NC}"; MISSING=1;
-        }
-    fi
-
     [ $MISSING -eq 1 ] && exit 1
     mkdir -p "$HOME/Downloads"
+    echo -e "${GREEN}[OK] All dependencies satisfied${NC}"
 }
 
-# --- 3. 파일 경로 수동 입력 ---
-get_file_input() {
-    echo -e "\n${YELLOW}[INFO] 패치할 .apk 또는 .apkm 파일의 전체 경로를 입력하세요.${NC}"
-    echo -e " (예: /storage/emulated/0/Download/kakaotalk.apk)"
+# --- Get APKM File Path ---
+get_apkm_file() {
+    echo ""
+    echo -e "${YELLOW}==================================${NC}"
+    echo -e "${GREEN}카카오톡 APKM 파일 선택${NC}"
+    echo -e "${YELLOW}==================================${NC}"
+    echo ""
     
-    read -p "> " SELECTED_FILE_PATH
-
-    SELECTED_FILE_PATH=$(echo "$SELECTED_FILE_PATH" | tr -d \'\")
-
-    if [ -z "$SELECTED_FILE_PATH" ]; then
-        echo -e "${RED}[ERROR] No path entered.${NC}"; return 1;
-    fi
-    if [ ! -f "$SELECTED_FILE_PATH" ]; then
-         echo -e "${RED}[ERROR] File not found: $SELECTED_FILE_PATH${NC}"; return 1;
-    fi
+    # 다운로드 폴더에서 .apkm 파일 찾기
+    local APKM_FILES=()
+    while IFS= read -r -d '' file; do
+        APKM_FILES+=("$(basename "$file")")
+    done < <(find "$BASE_DIR" -maxdepth 1 -name "*.apkm" -print0 2>/dev/null)
     
-    FILE_EXT="${SELECTED_FILE_PATH##*.}"
-    if [[ "$FILE_EXT" != "apk" && "$FILE_EXT" != "apkm" ]]; then
-         echo -e "${RED}[ERROR] The selected file is not an .apk or .apkm file.${NC}"; return 1;
-    fi
-    
-    echo -e "${GREEN}[SUCCESS] Selected file: $SELECTED_FILE_PATH${NC}"
-}
-
-# --- 4. 파일 준비 (병합 또는 복사) ---
-prepare_file() {
-    rm -f "$MERGED_APK_PATH" # 기존에 있던 파일 삭제
-
-    # .apkm 파일이면 병합 수행
-    if [[ "$FILE_EXT" == "apkm" ]]; then
-        echo -e "\n${BLUE}[INFO] .apkm file detected. Repackaging... (-> $MERGED_APK_PATH)${NC}"
-        rm -rf "$TEMP_MERGE_DIR" && mkdir -p "$TEMP_MERGE_DIR"
+    if [ ${#APKM_FILES[@]} -gt 0 ]; then
+        echo -e "${BLUE}다운로드 폴더에서 발견된 APKM 파일:${NC}"
+        for i in "${!APKM_FILES[@]}"; do
+            echo -e "  ${GREEN}$((i+1)).${NC} ${APKM_FILES[$i]}"
+        done
+        echo ""
+        echo -e "${YELLOW}번호를 입력하거나, 직접 경로를 입력하세요:${NC}"
+        read -r -p "> " selection
         
-        echo -e "${BLUE}[INFO] Extracting all files from .apkm...${NC}"
-        unzip -qqo "$SELECTED_FILE_PATH" -d "$TEMP_MERGE_DIR" 2> /dev/null
-
-        if [ ! -f "$TEMP_MERGE_DIR/base.apk" ]; then
-            echo -e "${RED}[ERROR] base.apk not found. Is the selected file a valid .apkm?${NC}"
-            rm -rf "$TEMP_MERGE_DIR"; return 1;
-        fi
-
-        echo -e "${BLUE}[INFO] Merging with APKEditor... (this may take a moment)${NC}"
-        java -jar "$EDITOR_JAR" m -i "$TEMP_MERGE_DIR" -o "$MERGED_APK_PATH"
-        
-        if [ ! -f "$MERGED_APK_PATH" ]; then
-            echo -e "${RED}[ERROR] APKEditor merge failed.${NC}"; rm -rf "$TEMP_MERGE_DIR"; return 1;
+        # 숫자인 경우
+        if [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -ge 1 ] && [ "$selection" -le ${#APKM_FILES[@]} ]; then
+            APKM_FILE="$BASE_DIR/${APKM_FILES[$((selection-1))]}"
+            echo -e "${GREEN}[선택됨] ${APKM_FILES[$((selection-1))]}${NC}"
+            return 0
         fi
         
-        echo -e "${GREEN}[SUCCESS] Merge complete.${NC}"
-        rm -rf "$TEMP_MERGE_DIR"
-    
-    # .apk 파일이면 그냥 복사
-    elif [[ "$FILE_EXT" == "apk" ]]; then
-        echo -e "\n${BLUE}[INFO] .apk file detected. Skipping merge.${NC}"
-        echo -e "${BLUE}[INFO] Copying file to target location... (-> $MERGED_APK_PATH)${NC}"
-        cp "$SELECTED_FILE_PATH" "$MERGED_APK_PATH"
-        echo -e "${GREEN}[SUCCESS] File copied.${NC}"
+        # 경로인 경우
+        if [ -n "$selection" ]; then
+            APKM_FILE="$selection"
+        fi
+    else
+        echo -e "${BLUE}APKM 파일의 전체 경로를 입력하세요:${NC}"
+        echo -e "${YELLOW}(예: /storage/emulated/0/Download/com.kakao.talk.apkm)${NC}"
+        echo ""
+        read -r -p "> " APKM_FILE
     fi
+    
+    # 빈 입력 체크
+    if [ -z "$APKM_FILE" ]; then
+        echo -e "${RED}[ERROR] 경로가 입력되지 않았습니다.${NC}"
+        return 1
+    fi
+    
+    # 파일 존재 체크
+    if [ ! -f "$APKM_FILE" ]; then
+        echo -e "${RED}[ERROR] 파일을 찾을 수 없습니다: $APKM_FILE${NC}"
+        return 1
+    fi
+    
+    echo -e "${GREEN}[OK] 파일 확인됨${NC}"
+    return 0
 }
 
-# --- 5. ReVanced CLI로 패치 실행 ---
-run_patch() {
-    echo -e "\n${GREEN}========= Running ReVanced CLI Patch =========${NC}"
+# --- Merge APKM ---
+merge_apkm() {
+    echo ""
+    echo -e "${BLUE}[INFO] APKM 파일 병합 시작...${NC}"
     
-    # 1. RVP 패치 파일 다운로드
-    echo -e "${BLUE}[INFO] Downloading Ample patches ($RVP_URL)...${NC}"
-    wget -q --show-progress -O "$RVP_FILE" "$RVP_URL"
-    if [ ! -f "$RVP_FILE" ]; then
-        echo -e "${RED}[ERROR] Failed to download RVP patch file.${NC}"; return 1;
+    local TEMP_DIR="$BASE_DIR/kakao_temp_merge"
+    rm -rf "$TEMP_DIR" && mkdir -p "$TEMP_DIR"
+    
+    # Extract APKM
+    echo -e "${BLUE}[INFO] APKM 압축 해제 중...${NC}"
+    unzip -qqo "$APKM_FILE" -d "$TEMP_DIR" 2>/dev/null || {
+        echo -e "${RED}[ERROR] APKM 압축 해제 실패${NC}"
+        rm -rf "$TEMP_DIR"
+        return 1
+    }
+    
+    # Check base.apk exists
+    if [ ! -f "$TEMP_DIR/base.apk" ]; then
+        echo -e "${RED}[ERROR] base.apk를 찾을 수 없습니다.${NC}"
+        rm -rf "$TEMP_DIR"
+        return 1
     fi
     
-    # 2. 패치 이름 입력받기
-    echo -e "\n${YELLOW}[INFO] 적용할 패치 이름을 콤마(,)로 구분하여 입력하세요.${NC}"
-    echo -e " (예: patch-name-1,patch-name-2,patch-name-3)"
-    read -p "> " PATCH_NAMES_INPUT
-    
-    if [ -z "$PATCH_NAMES_INPUT" ]; then
-        echo -e "${RED}[ERROR] No patch names entered.${NC}"; return 1;
-    fi
-    
-    # 3. 패치 이름 목록을 --include 인수로 변환
-    local PATCH_ARGS=""
-    IFS=',' read -ra PATCH_NAMES <<< "$PATCH_NAMES_INPUT"
-    for patch in "${PATCH_NAMES[@]}"; do
-        # 앞뒤 공백 제거
-        patch=$(echo "$patch" | xargs)
-        PATCH_ARGS+=" --include \"$patch\""
-    done
-    
-    echo -e "${BLUE}[INFO] Starting patch... (this will take several minutes)${NC}"
-    
-    local FINAL_PATCHED_FILE="$FINAL_OUTPUT_DIR/$(basename "$MERGED_APK_PATH" .apk)-patched.apk"
-    rm -f "$FINAL_PATCHED_FILE"
-    
-    # 4. ReVanced CLI 실행
-    # (주의: eval을 사용하여 $PATCH_ARGS의 따옴표를 올바르게 해석)
-    eval "java -jar \"$CLI_JAR\" patch \
-        -p \"$RVP_FILE\" \
-        -m \"$MERGED_APK_PATH\" \
-        -o \"$FINAL_PATCHED_FILE\" \
-        $PATCH_ARGS \
-        \"$MERGED_APK_PATH\""
-        
-    local EXIT_CODE=$?
-    if [ $EXIT_CODE -ne 0 ]; then
-        echo -e "${RED}[ERROR] ReVanced CLI patch failed.${NC}"; return 1;
-    fi
-
-    if [ ! -f "$FINAL_PATCHED_FILE" ]; then
-        echo -e "${RED}[ERROR] Patched file was not created.${NC}"; return 1;
-    fi
-    
-    echo -e "${GREEN}[SUCCESS] Patch complete!${NC}"
-    echo -e "${GREEN}File saved to: $FINAL_PATCHED_FILE${NC}"
-
-    # 5. 정리
+    # Merge with APKEditor
+    echo -e "${BLUE}[INFO] APKEditor로 병합 중... (시간이 걸릴 수 있습니다)${NC}"
     rm -f "$MERGED_APK_PATH"
-    rm -f "$RVP_FILE"
-    am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d "file://$FINAL_PATCHED_FILE"
+    
+    java -jar "$EDITOR_JAR" m -i "$TEMP_DIR" -o "$MERGED_APK_PATH" || {
+        echo -e "${RED}[ERROR] APKEditor 병합 실패${NC}"
+        rm -rf "$TEMP_DIR"
+        return 1
+    }
+    
+    # Verify merged file
+    if [ ! -f "$MERGED_APK_PATH" ]; then
+        echo -e "${RED}[ERROR] 병합된 APK 파일이 생성되지 않았습니다.${NC}"
+        rm -rf "$TEMP_DIR"
+        return 1
+    fi
+    
+    echo -e "${GREEN}[SUCCESS] 병합 완료: $MERGED_APK_PATH${NC}"
+    rm -rf "$TEMP_DIR"
+    return 0
 }
 
+# --- Run Patch ---
+run_patch() {
+    echo ""
+    echo -e "${GREEN}========================================${NC}"
+    echo -e "${GREEN}    AmpleReVanced 패치 스크립트 실행 중...${NC}"
+    echo -e "${GREEN}========================================${NC}"
+    
+    cd "$PATCH_SCRIPT_DIR"
+    
+    ./build.py \
+        --apk "$MERGED_APK_PATH" \
+        --package "$PKG_NAME" \
+        --source "ample" \
+        --include-universal \
+        --run || {
+        echo -e "${RED}[ERROR] 패치 스크립트 실패${NC}"
+        return 1
+    }
+    
+    echo ""
+    echo -e "${GREEN}========================================${NC}"
+    echo -e "${GREEN}    패치 완료!${NC}"
+    echo -e "${GREEN}========================================${NC}"
+    echo ""
+    echo -e "패치된 파일 위치:"
+    echo -e "${YELLOW}$PATCH_SCRIPT_DIR/out/${NC}"
+    echo ""
+}
 
-# --- 6. 메인 스크립트 실행 ---
+# --- Main ---
 main() {
     clear
-    echo -e "${GREEN}=== Smart File Merge & ReVanced CLI Patcher ===${NC}"
+    echo -e "${GREEN}======================================${NC}"
+    echo -e "${GREEN}  카카오톡 APKM 병합 & 패치 도구${NC}"
+    echo -e "${GREEN}======================================${NC}"
+    echo ""
     
-    # 1. 의존성 확인
+    # 1. Check dependencies
     check_dependencies
     
-    # 2. 파일 경로 입력
-    if ! get_file_input; then
-        echo -e "${YELLOW}[INFO] Operation cancelled.${NC}"; exit 0;
+    # 2. Get APKM file
+    if ! get_apkm_file; then
+        echo -e "${YELLOW}[INFO] 작업이 취소되었습니다.${NC}"
+        exit 0
     fi
     
-    # 3. 파일 준비 (병합 또는 복사)
-    if ! prepare_file; then
+    # 3. Merge APKM
+    if ! merge_apkm; then
         exit 1
     fi
     
-    # 4. 패치 실행
+    # 4. Run patch
     if ! run_patch; then
         exit 1
     fi
     
-    echo -e "\n${GREEN}========= ALL TASKS COMPLETE =========${NC}"
-    echo -e "최종 파일이 Sdcard 최상위 폴더($FINAL_OUTPUT_DIR)에 저장되었습니다."
-    echo -e "${GREEN}======================================${NC}"
+    echo -e "${GREEN}모든 작업이 완료되었습니다!${NC}"
 }
 
-# 스크립트 실행
+# Run
 main
