@@ -1,9 +1,12 @@
 #!/bin/bash
 #
 # EXPERIMENTAL XAPK Repacker (via Python) + Patcher for DCInside
-# This script uses xapktoapk.py instead of manual apktool logic.
 #
-# !!! THIS IS STILL HIGHLY LIKELY TO FAIL !!!
+# 이 스크립트는 사용자의 명시적인 요청에 따라 LuigiVampa92/xapk-to-apk 스크립트를
+# 다운로드하여 실행합니다.
+#
+# !!! 경고: 이 스크립트는 patch3.sh와 동일한 이유(Apktool 리소스 충돌)로 !!!
+# !!! 실패할 확률이 매우 높습니다.                                    !!!
 #
 set -e
 
@@ -21,15 +24,12 @@ PATCH_SCRIPT_DIR="$HOME/revanced-build-script-ample"
 WORK_DIR="$HOME/xapk_py_workdir" # 임시 작업 폴더
 
 # --- Tool Paths ---
-# .py 스크립트와 서명 도구만 다운로드합니다. (apktool은 .py가 알아서 할 것으로 가정)
 PYTHON_SCRIPT_URL="https://raw.githubusercontent.com/LuigiVampa92/xapk-to-apk/refs/heads/development/xapktoapk.py"
 PYTHON_SCRIPT_PATH="$WORK_DIR/xapktoapk.py"
 SIGNER_JAR="$BASE_DIR/uber-apk-signer-1.3.0.jar"
 
 # --- Output Paths ---
-# .py 스크립트가 생성할 파일 (서명 전)
 REPACKED_APK_PATH="$HOME/Downloads/DCInside_Repacked_py.apk"
-# 서명 후 패치 스크립트에 전달될 최종 파일
 FINAL_INPUT_APK_PATH="$HOME/Downloads/DCInside_Repacked_py-signed.apk" 
 
 # --- Helper Functions ---
@@ -43,7 +43,6 @@ check_dependencies() {
     print_info "필수 도구 확인 중..."
     local MISSING=0
     
-    # 기본 도구
     for cmd in curl wget unzip java python git; do
         if ! command -v $cmd &> /dev/null; then
             print_error "'$cmd' 가 없습니다. (pkg install $cmd)"
@@ -51,7 +50,6 @@ check_dependencies() {
         fi
     done
     
-    # AmpleReVanced 스크립트
     if [ ! -d "$PATCH_SCRIPT_DIR" ]; then
         print_warn "AmpleReVanced 빌드 스크립트 다운로드 중..."
         git clone https://github.com/AmpleReVanced/revanced-build-script.git "$PATCH_SCRIPT_DIR" || {
@@ -64,9 +62,11 @@ check_dependencies() {
     # xapktoapk.py 다운로드
     mkdir -p "$WORK_DIR"
     if [ ! -f "$PYTHON_SCRIPT_PATH" ]; then
-        print_warn "xapktoapk.py (Python 스크립트) 다운로드 중..."
+        print_warn "요청하신 'xapktoapk.py' (Python 스크립트) 다운로드 중..."
         wget --quiet --show-progress -O "$PYTHON_SCRIPT_PATH" "$PYTHON_SCRIPT_URL" || {
             print_error "xapktoapk.py 다운로드 실패"; MISSING=1; }
+    else
+        print_info "요청하신 'xapktoapk.py' 스크립트가 이미 존재합니다."
     fi
 
     # uber-apk-signer (서명 도구) 다운로드
@@ -90,7 +90,6 @@ get_xapk_file() {
     echo -e "${YELLOW}==================================${NC}"
     echo ""
     
-    # (이전 스크립트와 동일한 코드를 사용)
     local XAPK_FILES=()
     while IFS= read -r -d '' file; do
         XAPK_FILES+=("$(basename "$file")")
@@ -128,18 +127,17 @@ get_xapk_file() {
 
 # --- 3. Repack XAPK (Using Python script) ---
 repack_with_python() {
-    print_info "Python 스크립트(xapktoapk.py)로 재조립을 시작합니다..."
+    print_info "요청하신 Python 스크립트(xapktoapk.py)로 재조립을 시작합니다..."
     
-    # 0. 이전 작업 파일 삭제
     rm -f "$REPACKED_APK_PATH" "$FINAL_INPUT_APK_PATH"
     
-    # 1. Python 스크립트 실행
     print_info "[1/2] xapktoapk.py 실행 중... (시간이 매우 오래 걸림)"
     print_warn "만약 'ModuleNotFoundError'가 발생하면, 'pip install [모듈명]'으로 직접 설치해야 합니다."
     
+    # 파이썬 스크립트 실행
     python "$PYTHON_SCRIPT_PATH" "$SELECTED_XAPK_FILE" -o "$REPACKED_APK_PATH" || {
         print_error "Python 스크립트 실행 실패!"
-        print_error "patch3.sh와 동일하게 'Apktool' 재조립(리컴파일) 단계에서 충돌했을 것입니다."
+        print_error "이것이 바로 patch3.sh와 동일한 'Apktool 리소스 충돌' 오류입니다."
         return 1
     }
 
@@ -149,7 +147,6 @@ repack_with_python() {
     fi
     print_success "Python 스크립트가 재조립을 완료했습니다."
 
-    # 2. APK 서명
     print_info "[2/2] 재조립된 APK 서명 중..."
     java -jar "$SIGNER_JAR" -a "$REPACKED_APK_PATH" || { print_error "서명 실패!"; return 1; }
     
@@ -158,7 +155,7 @@ repack_with_python() {
         return 1
     fi
 
-    rm -rf "$WORK_DIR" # xapktoapk.py만 삭제 (임시 폴더가 크지 않으므로)
+    rm -rf "$WORK_DIR"
     print_success "XAPK 재조립 및 서명 완료!"
     return 0
 }
@@ -175,7 +172,6 @@ run_patch() {
     
     print_info "build.py 실행 중... (입력 파일: $FINAL_INPUT_APK_PATH)"
     
-    # 재조립+서명된 APK($FINAL_INPUT_APK_PATH)를 입력으로 사용
     python build.py \
         --apk "$FINAL_INPUT_APK_PATH" \
         --package "$PKG_NAME" \
@@ -188,7 +184,6 @@ run_patch() {
     echo -e "${GREEN}    패치 프로세스 완료!${NC}"
     echo -e "${GREEN}========================================${NC}"
     
-    # 결과물 확인 및 이동
     local OUTPUT_APK=""
     if [ -f "output/patched.apk" ]; then
         OUTPUT_APK="output/patched.apk"
@@ -204,7 +199,7 @@ run_patch() {
         print_success "저장 완료: /storage/emulated/0/Download/DCInside_ReVanced.apk"
     else
         print_error "결과물 파일을 찾을 수 없습니다."
-        print_warn "다음 폴더를 직접 확인해보세요: $PATCH_SCRIPT_DIR/output 또는 $PATCH_SCRIPT_DIR/out"
+        print_warn "다음 폴더를 직접 확인해보세요: $PATCH_SCRIPT_DIR/output"
     fi
 }
 
@@ -214,7 +209,8 @@ main() {
     echo -e "${RED}======================================${NC}"
     echo -e "${RED}  디시 XAPK 재조립(Python) + 패치   ${NC}"
     echo -e "${RED}======================================${NC}"
-    echo -e "${YELLOW}경고: 이 스크립트도 동일한 이유로 실패할 것입니다.${NC}"
+    echo -e "${YELLOW}경고: 이 스크립트는 patch3.sh와 동일한${NC}"
+    echo -e "${YELLOW}      오류로 실패할 것입니다.${NC}"
     echo ""
     
     check_dependencies || exit 1
