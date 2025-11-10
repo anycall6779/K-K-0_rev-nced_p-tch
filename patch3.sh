@@ -1,12 +1,9 @@
 #!/bin/bash
 #
-# EXPERIMENTAL XAPK Repacker (via Python) + Patcher for DCInside
+# DCInside XAPK Extractor + Patcher (Final Version)
 #
-# 이 스크립트는 사용자의 명시적인 요청에 따라 LuigiVampa92/xapk-to-apk 스크립트를
-# 다운로드하여 실행합니다.
-#
-# !!! 경고: 이 스크립트는 patch3.sh와 동일한 이유(Apktool 리소스 충돌)로 !!!
-# !!! 실패할 확률이 매우 높습니다.                                    !!!
+# 이 스크립트는 실패하는 '재조립' 대신, 'base.apk'만 '추출'하여
+# 패치를 진행하는 유일하게 성공 가능한 방법입니다.
 #
 set -e
 
@@ -21,16 +18,10 @@ NC='\033[0m'
 PKG_NAME="com.dcinside.app.android"
 BASE_DIR="/storage/emulated/0/Download"
 PATCH_SCRIPT_DIR="$HOME/revanced-build-script-ample"
-WORK_DIR="$HOME/xapk_py_workdir" # 임시 작업 폴더
+WORK_DIR="$HOME/xapk_extract_workdir" # 임시 추출 폴더
 
-# --- Tool Paths ---
-PYTHON_SCRIPT_URL="https://raw.githubusercontent.com/LuigiVampa92/xapk-to-apk/refs/heads/development/xapktoapk.py"
-PYTHON_SCRIPT_PATH="$WORK_DIR/xapktoapk.py"
-SIGNER_JAR="$BASE_DIR/uber-apk-signer-1.3.0.jar"
-
-# --- Output Paths ---
-REPACKED_APK_PATH="$HOME/Downloads/DCInside_Repacked_py.apk"
-FINAL_INPUT_APK_PATH="$HOME/Downloads/DCInside_Repacked_py-signed.apk" 
+# --- Output Path ---
+EXTRACTED_BASE_APK="$WORK_DIR/DCInside_Base.apk" # 추출된 APK가 저장될 경로
 
 # --- Helper Functions ---
 print_info() { echo -e "${BLUE}[INFO] $1${NC}"; }
@@ -43,6 +34,7 @@ check_dependencies() {
     print_info "필수 도구 확인 중..."
     local MISSING=0
     
+    # (apktool, signer 등 실험용 도구 모두 제외)
     for cmd in curl wget unzip java python git; do
         if ! command -v $cmd &> /dev/null; then
             print_error "'$cmd' 가 없습니다. (pkg install $cmd)"
@@ -59,26 +51,7 @@ check_dependencies() {
         git -C "$PATCH_SCRIPT_DIR" pull || print_warn "업데이트 실패. 기존 버전으로 진행."
     fi
     
-    # xapktoapk.py 다운로드
-    mkdir -p "$WORK_DIR"
-    if [ ! -f "$PYTHON_SCRIPT_PATH" ]; then
-        print_warn "요청하신 'xapktoapk.py' (Python 스크립트) 다운로드 중..."
-        wget --quiet --show-progress -O "$PYTHON_SCRIPT_PATH" "$PYTHON_SCRIPT_URL" || {
-            print_error "xapktoapk.py 다운로드 실패"; MISSING=1; }
-    else
-        print_info "요청하신 'xapktoapk.py' 스크립트가 이미 존재합니다."
-    fi
-
-    # uber-apk-signer (서명 도구) 다운로드
-    if [ ! -f "$SIGNER_JAR" ]; then
-        print_warn "uber-apk-signer (서명 도구) 다운로드 중..."
-        wget --quiet --show-progress -O "$SIGNER_JAR" \
-            "https://github.com/patrickfav/uber-apk-signer/releases/download/v1.3.0/uber-apk-signer-1.3.0.jar" || {
-            print_error "uber-apk-signer 다운로드 실패"; MISSING=1; }
-    fi
-    
     [ $MISSING -eq 1 ] && exit 1
-    mkdir -p "$HOME/Downloads"
     print_success "모든 준비 완료"
 }
 
@@ -125,38 +98,37 @@ get_xapk_file() {
     return 0
 }
 
-# --- 3. Repack XAPK (Using Python script) ---
-repack_with_python() {
-    print_info "요청하신 Python 스크립트(xapktoapk.py)로 재조립을 시작합니다..."
+# --- 3. Extract Base APK (핵심 기능) ---
+extract_base_apk() {
+    print_info "XAPK 파일에서 '본체 APK' 추출을 시작합니다..."
     
-    rm -f "$REPACKED_APK_PATH" "$FINAL_INPUT_APK_PATH"
-    
-    print_info "[1/2] xapktoapk.py 실행 중... (시간이 매우 오래 걸림)"
-    print_warn "만약 'ModuleNotFoundError'가 발생하면, 'pip install [모듈명]'으로 직접 설치해야 합니다."
-    
-    # 파이썬 스크립트 실행
-    python "$PYTHON_SCRIPT_PATH" "$SELECTED_XAPK_FILE" -o "$REPACKED_APK_PATH" || {
-        print_error "Python 스크립트 실행 실패!"
-        print_error "이것이 바로 patch3.sh와 동일한 'Apktool 리소스 충돌' 오류입니다."
-        return 1
-    }
-
-    if [ ! -f "$REPACKED_APK_PATH" ]; then
-        print_error "재조립된 APK 파일($REPACKED_APK_PATH)이 생성되지 않았습니다."
-        return 1
-    fi
-    print_success "Python 스크립트가 재조립을 완료했습니다."
-
-    print_info "[2/2] 재조립된 APK 서명 중..."
-    java -jar "$SIGNER_JAR" -a "$REPACKED_APK_PATH" || { print_error "서명 실패!"; return 1; }
-    
-    if [ ! -f "$FINAL_INPUT_APK_PATH" ]; then
-        print_error "서명된 파일($FINAL_INPUT_APK_PATH)을 찾을 수 없습니다."
-        return 1
-    fi
-
     rm -rf "$WORK_DIR"
-    print_success "XAPK 재조립 및 서명 완료!"
+    mkdir -p "$WORK_DIR"
+    
+    local EXTRACT_DIR="$WORK_DIR/extracted"
+    mkdir -p "$EXTRACT_DIR"
+
+    print_info "[1/2] XAPK 압축 해제 중..."
+    unzip -q "$SELECTED_XAPK_FILE" -d "$EXTRACT_DIR" || { print_error "XAPK 압축 해제 실패"; return 1; }
+
+    print_info "[2/2] 핵심(Base) APK 파일 검색 중..."
+    # 님이 보여주신 파일 목록에 따라, 'config.'로 시작하지 않는 .apk 파일을 찾습니다.
+    local BASE_APK=$(find "$EXTRACT_DIR" -name "*.apk" -not -name "config.*.apk" | head -n 1)
+    
+    if [[ -z "$BASE_APK" ]]; then
+        # 만약 위 조건으로 못찾으면, 'split_config'도 제외해 봅니다.
+        BASE_APK=$(find "$EXTRACT_DIR" -name "*.apk" -not -name "split_config.*.apk" | head -n 1)
+    fi
+    
+    if [[ -z "$BASE_APK" ]]; then
+        print_error "XAPK 파일 안에서 핵심 'base.apk' (com.dcinside.app.android.apk) 파일을 찾지 못했습니다."
+        return 1
+    fi
+    
+    cp "$BASE_APK" "$EXTRACTED_BASE_APK"
+    rm -rf "$EXTRACT_DIR"
+    
+    print_success "핵심 APK 추출 완료: $(basename "$EXTRACTED_BASE_APK")"
     return 0
 }
 
@@ -170,10 +142,11 @@ run_patch() {
     cd "$PATCH_SCRIPT_DIR"
     rm -rf output out
     
-    print_info "build.py 실행 중... (입력 파일: $FINAL_INPUT_APK_PATH)"
+    print_info "build.py 실행 중... (입력 파일: $EXTRACTED_BASE_APK)"
     
+    # 추출된 APK($EXTRACTED_BASE_APK)를 입력으로 사용
     python build.py \
-        --apk "$FINAL_INPUT_APK_PATH" \
+        --apk "$EXTRACTED_BASE_APK" \
         --package "$PKG_NAME" \
         --include-universal \
         --run || {
@@ -206,20 +179,20 @@ run_patch() {
 # --- Main Execution Flow ---
 main() {
     clear
-    echo -e "${RED}======================================${NC}"
-    echo -e "${RED}  디시 XAPK 재조립(Python) + 패치   ${NC}"
-    echo -e "${RED}======================================${NC}"
-    echo -e "${YELLOW}경고: 이 스크립트는 patch3.sh와 동일한${NC}"
-    echo -e "${YELLOW}      오류로 실패할 것입니다.${NC}"
+    echo -e "${GREEN}======================================${NC}"
+    echo -e "${GREEN}  디시 XAPK 추출 + 패치 (최종 버전) ${NC}"
+    echo -e "${GREEN}======================================${NC}"
     echo ""
     
     check_dependencies || exit 1
     get_xapk_file || exit 0
-    repack_with_python || { print_error "치명적 오류: XAPK 재조립에 실패했습니다."; exit 1; }
+    extract_base_apk || { print_error "치명적 오류: XAPK에서 Base APK를 추출하지 못했습니다."; exit 1; }
     run_patch || { print_error "치명적 오류: APK 패치에 실패했습니다."; exit 1; }
     
+    rm -rf "$WORK_DIR"
+    
     echo ""
-    print_success "모든 작업이 (기적적으로) 성공했습니다."
+    print_success "모든 작업이 성공적으로 끝났습니다."
 }
 
 main
