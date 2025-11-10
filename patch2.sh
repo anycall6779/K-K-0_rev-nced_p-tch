@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Simplified APKM Merger + Patcher for KakaoTalk (AmpleReVanced Edition)
-# Fixed version for Termux
+# (Fixed output finding and custom destination path)
 #
 set -e
 
@@ -15,8 +15,8 @@ NC='\033[0m'
 # Configuration
 PKG_NAME="com.kakao.talk"
 BASE_DIR="/storage/emulated/0/Download"
-PATCH_SCRIPT_DIR="$HOME/revanced-build-script-ample"  # 폴더 이름 변경 (충돌 방지)
-MERGED_APK_PATH="$HOME/Downloads/KakaoTalk.apk"
+PATCH_SCRIPT_DIR="$HOME/revanced-build-script-ample"
+MERGED_APK_PATH="$HOME/Downloads/KakaoTalk_Merged.apk" # 원본과 겹치지 않게 이름 변경
 EDITOR_JAR="$BASE_DIR/APKEditor-1.4.5.jar"
 
 # Get device info
@@ -35,7 +35,6 @@ check_dependencies() {
         fi
     done
     
-    # AmpleReVanced 스크립트가 없으면 클론
     if [ ! -d "$PATCH_SCRIPT_DIR" ]; then
         echo -e "${YELLOW}[INFO] AmpleReVanced 빌드 스크립트 다운로드 중...${NC}"
         git clone https://github.com/AmpleReVanced/revanced-build-script.git "$PATCH_SCRIPT_DIR" || {
@@ -43,12 +42,10 @@ check_dependencies() {
             MISSING=1
         }
     else
-        # 이미 있으면 최신 버전으로 업데이트
         echo -e "${YELLOW}[INFO] 빌드 스크립트 업데이트 확인 중...${NC}"
         git -C "$PATCH_SCRIPT_DIR" pull
     fi
     
-    # APKEditor 확인 및 다운로드
     if [ ! -f "$EDITOR_JAR" ]; then
         echo -e "${YELLOW}[INFO] APKEditor 다운로드 중...${NC}"
         wget --quiet --show-progress -O "$EDITOR_JAR" \
@@ -130,7 +127,7 @@ merge_apkm() {
     
     echo -e "${BLUE}[INFO] APKEditor로 병합 중... (잠시만 기다려주세요)${NC}"
     rm -f "$MERGED_APK_PATH"
-    java -jar "$EDITOR_JAR" m -i "$TEMP_DIR" -o "$MERGED_APK_PATH" || {
+    java -jar "$EDITOR_JAR" m -i "$TEMP_DIR" -o "$MERGED_APK_PATH" &> /dev/null || {
         echo -e "${RED}[ERROR] 병합 실패${NC}"
         rm -rf "$TEMP_DIR"
         return 1
@@ -142,7 +139,7 @@ merge_apkm() {
         return 1
     fi
     
-    echo -e "${GREEN}[SUCCESS] 병합 완료: $MERGED_APK_PATH${NC}"
+    echo -e "${GREEN}[SUCCESS] 병합 완료: $(basename "$MERGED_APK_PATH")${NC}"
     rm -rf "$TEMP_DIR"
     return 0
 }
@@ -156,9 +153,11 @@ run_patch() {
     
     cd "$PATCH_SCRIPT_DIR"
     
-    # AmpleReVanced 전용 build.py 실행
-    # (이전 Naijun 스크립트와 옵션이 약간 다를 수 있으므로 기본 옵션만 사용)
-    python3 build.py \
+    # 이전 결과물 삭제
+    rm -rf output out
+    
+    # Termux 호환성을 위해 python3 -> python
+    python build.py \
         --apk "$MERGED_APK_PATH" \
         --package "$PKG_NAME" \
         --include-universal \
@@ -172,15 +171,27 @@ run_patch() {
     echo -e "${GREEN}    패치 완료!${NC}"
     echo -e "${GREEN}========================================${NC}"
     
-    # 결과물 이동
-    local OUTPUT_APK=$(find "$PATCH_SCRIPT_DIR/out" -name "KakaoTalk*.apk" | head -n 1)
-    if [ -f "$OUTPUT_APK" ]; then
-        echo -e "${BLUE}[INFO] 결과물을 다운로드 폴더로 이동합니다...${NC}"
-        mv "$OUTPUT_APK" "/storage/emulated/0/Download/"
-        echo -e "${GREEN}[SUCCESS] 저장 완료: /storage/emulated/0/Download/$(basename "$OUTPUT_APK")${NC}"
+    # --- [수정된 부분] ---
+    # 1. 디시인사이드 스크립트에서 성공한 'output/out' 폴더 자동 검색 로직 적용
+    local OUTPUT_APK=""
+    if [ -f "output/patched.apk" ]; then
+        OUTPUT_APK="output/patched.apk"
+    elif [ -f "out/patched.apk" ]; then
+        OUTPUT_APK="out/patched.apk"
     else
-        echo -e "${YELLOW}[WARN] 결과물 파일을 찾을 수 없습니다. 직접 확인해주세요: $PATCH_SCRIPT_DIR/out/${NC}"
+        OUTPUT_APK=$(find output out -name "*.apk" -type f 2>/dev/null | head -n 1)
     fi
+
+    # 2. 결과물 확인 및 요청하신 경로로 이동
+    if [ -n "$OUTPUT_APK" ] && [ -f "$OUTPUT_APK" ]; then
+        echo -e "${BLUE}[INFO] 결과물을 다운로드 폴더로 이동합니다...${NC}"
+        # 덮어쓰기(-f) 및 요청하신 파일명으로 이동
+        mv -f "$OUTPUT_APK" "/storage/emulated/0/Download/kakaotalkpatch.apk"
+        echo -e "${GREEN}[SUCCESS] 저장 완료: /storage/emulated/0/Download/kakaotalkpatch.apk${NC}"
+    else
+        echo -e "${YELLOW}[WARN] 결과물 파일을 찾을 수 없습니다. 직접 확인해주세요: $PATCH_SCRIPT_DIR/output 또는 $PATCH_SCRIPT_DIR/out${NC}"
+    fi
+    # --- [여기까지 수정] ---
 }
 
 # --- Main ---
