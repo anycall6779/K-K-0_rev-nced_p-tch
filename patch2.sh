@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Simplified APKM Merger + Patcher for KakaoTalk (AmpleReVanced Edition)
-# (Fixed output finding and custom destination path)
+# (Modified: Enforces Custom Keystore for Consistent Signing)
 #
 set -e
 
@@ -18,6 +18,10 @@ BASE_DIR="/storage/emulated/0/Download"
 PATCH_SCRIPT_DIR="$HOME/revanced-build-script-ample"
 MERGED_APK_PATH="$HOME/Downloads/KakaoTalk_Merged.apk" # 원본과 겹치지 않게 이름 변경
 EDITOR_JAR="$BASE_DIR/APKEditor-1.4.5.jar"
+
+# [추가됨] 키스토어 설정
+KEYSTORE_URL="https://github.com/anycall6779/K-K-0_rev-nced_p-tch/raw/refs/heads/main/my_kakao_key.keystore"
+KEYSTORE_FILE="my_kakao_key.keystore"
 
 # Get device info
 ARCH=$(getprop ro.product.cpu.abi)
@@ -153,14 +157,23 @@ run_patch() {
     
     cd "$PATCH_SCRIPT_DIR"
     
+    # [추가됨] 깃허브에서 고정 키스토어 다운로드
+    echo -e "${YELLOW}[INFO] 고정 키스토어(my_kakao_key.keystore) 다운로드 중...${NC}"
+    curl -L -o "$KEYSTORE_FILE" "$KEYSTORE_URL" || {
+        echo -e "${RED}[ERROR] 키스토어 다운로드 실패! 인터넷 연결이나 URL을 확인하세요.${NC}"
+        return 1
+    }
+
     # 이전 결과물 삭제
     rm -rf output out
     
     # Termux 호환성을 위해 python3 -> python
+    # [수정됨] --keystore 옵션을 추가하여 다운로드한 키파일 사용 강제
     python build.py \
         --apk "$MERGED_APK_PATH" \
         --package "$PKG_NAME" \
         --include-universal \
+        --keystore "$KEYSTORE_FILE" \
         --run || {
         echo -e "${RED}[ERROR] 패치 과정 중 오류 발생${NC}"
         return 1
@@ -171,7 +184,6 @@ run_patch() {
     echo -e "${GREEN}    패치 완료!${NC}"
     echo -e "${GREEN}========================================${NC}"
     
-    # --- [수정된 부분] ---
     # 1. 디시인사이드 스크립트에서 성공한 'output/out' 폴더 자동 검색 로직 적용
     local OUTPUT_APK=""
     if [ -f "output/patched.apk" ]; then
@@ -191,14 +203,13 @@ run_patch() {
     else
         echo -e "${YELLOW}[WARN] 결과물 파일을 찾을 수 없습니다. 직접 확인해주세요: $PATCH_SCRIPT_DIR/output 또는 $PATCH_SCRIPT_DIR/out${NC}"
     fi
-    # --- [여기까지 수정] ---
 }
 
 # --- Main ---
 main() {
     clear
     echo -e "${GREEN}======================================${NC}"
-    echo -e "${GREEN}  카카오톡 APKM 병합 & 패치 (Ample)${NC}"
+    echo -e "${GREEN}  카카오톡 APKM 병합 & 패치 (Key Fixed)${NC}"
     echo -e "${GREEN}======================================${NC}"
     echo ""
     
