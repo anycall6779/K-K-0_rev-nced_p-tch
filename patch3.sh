@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # DCInside Patcher based on AmpleReVanced
-# (Modified from KakaoTalk Patcher)
+# (Modified: Enforces Custom Keystore for Consistent Signing)
 #
 set -e
 
@@ -16,7 +16,10 @@ NC='\033[0m'
 PKG_NAME="com.dcinside.app.android"
 BASE_DIR="/storage/emulated/0/Download"
 PATCH_SCRIPT_DIR="$HOME/revanced-build-script-ample"
-# MERGED_APK_PATH 및 EDITOR_JAR는 필요 없음 (APKM 병합 안 함)
+
+# [추가됨] 키스토어 설정
+KEYSTORE_URL="https://github.com/anycall6779/K-K-0_rev-nced_p-tch/raw/refs/heads/main/my_kakao_key.keystore"
+KEYSTORE_FILE="my_kakao_key.keystore"
 
 # --- Helper Functions ---
 print_info() { echo -e "${BLUE}[INFO] $1${NC}"; }
@@ -114,15 +117,25 @@ run_patch() {
     
     cd "$PATCH_SCRIPT_DIR"
     
+    # [추가됨] 깃허브에서 고정 키스토어 다운로드
+    echo -e "${YELLOW}[INFO] 고정 키스토어(my_kakao_key.keystore) 다운로드 중...${NC}"
+    curl -L -o "$KEYSTORE_FILE" "$KEYSTORE_URL" || {
+        print_error "키스토어 다운로드 실패! 인터넷 연결이나 URL을 확인하세요."
+        return 1
+    }
+
     # 이전 결과물 삭제 및 폴더 확인
     rm -rf output out
     
     # 패치 실행 (선택된 APK 파일을 바로 사용)
     print_info "build.py 실행 중... (입력 파일: $SELECTED_APK_FILE)"
+    
+    # [수정됨] --keystore 옵션 추가
     python build.py \
         --apk "$SELECTED_APK_FILE" \
         --package "$PKG_NAME" \
         --include-universal \
+        --keystore "$KEYSTORE_FILE" \
         --run || {
         print_error "패치 과정 중 오류가 발생했습니다."
         return 1
@@ -158,7 +171,7 @@ run_patch() {
 main() {
     clear
     echo -e "${GREEN}======================================${NC}"
-    echo -e "${GREEN}     디시인사이드 패치 (최종)      ${NC}"
+    echo -e "${GREEN}  디시인사이드 패치 (Key Fixed)   ${NC}"
     echo -e "${GREEN}======================================${NC}"
     echo ""
     
