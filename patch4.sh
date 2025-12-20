@@ -1,7 +1,7 @@
 #!/bin/bash
 #
-# Simplified APKM Merger + Patcher for KakaoTalk (AmpleReVanced Edition)
-# (Modified: Enforces Custom Keystore for Consistent Signing)
+# ReVanced Patcher for KakaoTalk (Target: footfoot22/revanced-patches_fix)
+# (Modified: APKM Merge + CLI Patching)
 #
 set -e
 
@@ -15,40 +15,30 @@ NC='\033[0m'
 # Configuration
 PKG_NAME="com.kakao.talk"
 BASE_DIR="/storage/emulated/0/Download"
-PATCH_SCRIPT_DIR="$HOME/revanced-build-script-ample"
-MERGED_APK_PATH="$HOME/Downloads/KakaoTalk_Merged.apk" # 원본과 겹치지 않게 이름 변경
+WORK_DIR="$HOME/revanced-kakao-footfoot22"
+MERGED_APK_PATH="$HOME/Downloads/KakaoTalk_Merged.apk"
 EDITOR_JAR="$BASE_DIR/APKEditor-1.4.5.jar"
 
-# [추가됨] 키스토어 설정
-KEYSTORE_URL="https://github.com/anycall6779/K-K-0_rev-nced_p-tch/raw/refs/heads/main/my_kakao_key.keystore"
-KEYSTORE_FILE="my_kakao_key.keystore"
-
-# Get device info
-ARCH=$(getprop ro.product.cpu.abi)
-[ "$ARCH" = "arm64-v8a" ] && ARCH_APK="arm64" || ARCH_APK="armeabi"
+# Repositories (footfoot22 설정)
+PATCHES_REPO="footfoot22/revanced-patches_fix"
+CLI_REPO="ReVanced/revanced-cli"
+INTEGRATIONS_REPO="ReVanced/revanced-integrations"
 
 # --- Dependency Check ---
 check_dependencies() {
     echo -e "${BLUE}[INFO] 필수 도구 확인 중...${NC}"
     local MISSING=0
     
-    for cmd in curl wget unzip java python git; do
+    # jq 추가됨 (GitHub API 파싱용)
+    for cmd in curl wget unzip java git jq; do
         if ! command -v $cmd &> /dev/null; then
             echo -e "${RED}[ERROR] '$cmd' 가 없습니다. 설치 명령어: pkg install $cmd${NC}"
             MISSING=1
         fi
     done
     
-    if [ ! -d "$PATCH_SCRIPT_DIR" ]; then
-        echo -e "${YELLOW}[INFO] AmpleReVanced 빌드 스크립트 다운로드 중...${NC}"
-        git clone https://github.com/AmpleReVanced/revanced-build-script.git "$PATCH_SCRIPT_DIR" || {
-            echo -e "${RED}[ERROR] 빌드 스크립트 다운로드 실패${NC}"
-            MISSING=1
-        }
-    else
-        echo -e "${YELLOW}[INFO] 빌드 스크립트 업데이트 확인 중...${NC}"
-        git -C "$PATCH_SCRIPT_DIR" pull
-    fi
+    # 작업 폴더 생성
+    mkdir -p "$WORK_DIR"
     
     if [ ! -f "$EDITOR_JAR" ]; then
         echo -e "${YELLOW}[INFO] APKEditor 다운로드 중...${NC}"
@@ -62,6 +52,28 @@ check_dependencies() {
     [ $MISSING -eq 1 ] && exit 1
     mkdir -p "$HOME/Downloads"
     echo -e "${GREEN}[OK] 모든 준비 완료${NC}"
+}
+
+# --- Helper: Get Latest Release ---
+get_latest_release() {
+    local repo=$1
+    local pattern=$2
+    local output=$3
+    
+    echo -e "${YELLOW}[DOWNLOAD] $repo 에서 최신 파일 검색 중...${NC}"
+    local download_url=$(curl -s "https://api.github.com/repos/$repo/releases/latest" | \
+        jq -r ".assets[] | select(.name | test(\"$pattern\")) | .browser_download_url" | head -n 1)
+
+    if [ -z "$download_url" ] || [ "$download_url" == "null" ]; then
+        echo -e "${RED}[ERROR] $repo 에서 $pattern 파일을 찾을 수 없습니다.${NC}"
+        return 1
+    fi
+
+    # 이미 파일이 있으면 다운로드 건너뛰기 (선택 사항)
+    # rm -f "$output" # 항상 새로 받으려면 주석 해제
+    
+    echo -e "⬇️ 다운로드: $download_url"
+    curl -L -o "$output" "$download_url"
 }
 
 # --- Get APKM File Path ---
@@ -141,67 +153,81 @@ merge_apkm() {
         echo -e "${RED}[ERROR] 병합된 파일 생성 실패${NC}"
         rm -rf "$TEMP_DIR"
         return 1
-    fi
+    }
     
     echo -e "${GREEN}[SUCCESS] 병합 완료: $(basename "$MERGED_APK_PATH")${NC}"
     rm -rf "$TEMP_DIR"
     return 0
 }
 
-# --- Run Patch (AmpleReVanced) ---
+# --- Run Patch (footfoot22/CLI) ---
 run_patch() {
     echo ""
     echo -e "${GREEN}========================================${NC}"
-    echo -e "${GREEN}    AmpleReVanced 패치 시작...${NC}"
+    echo -e "${GREEN}    footfoot22 패치 다운로드 및 실행...${NC}"
     echo -e "${GREEN}========================================${NC}"
     
-    cd "$PATCH_SCRIPT_DIR"
-    
-    # [추가됨] 깃허브에서 고정 키스토어 다운로드
-    echo -e "${YELLOW}[INFO] 고정 키스토어(my_kakao_key.keystore) 다운로드 중...${NC}"
-    curl -L -o "$KEYSTORE_FILE" "$KEYSTORE_URL" || {
-        echo -e "${RED}[ERROR] 키스토어 다운로드 실패! 인터넷 연결이나 URL을 확인하세요.${NC}"
-        return 1
-    }
+    cd "$WORK_DIR"
 
-    # 이전 결과물 삭제
-    rm -rf output out
+    # 1. 파일 다운로드 (CLI, Patches, Integrations)
+    get_latest_release "$CLI_REPO" "cli.*\.jar" "revanced-cli.jar" || return 1
+    get_latest_release "$INTEGRATIONS_REPO" "integrations.*\.apk" "integrations.apk" || return 1
+    get_latest_release "$PATCHES_REPO" "patches.*\.jar" "patches.jar" || return 1
     
-    # Termux 호환성을 위해 python3 -> python
-    # [수정됨] --keystore 옵션을 추가하여 다운로드한 키파일 사용 강제
-    python build.py \
-        --apk "$MERGED_APK_PATH" \
-        --package "$PKG_NAME" \
-        --include-universal \
-        --keystore "$KEYSTORE_FILE" \
-        --run || {
-        echo -e "${RED}[ERROR] 패치 과정 중 오류 발생${NC}"
-        return 1
-    }
-    
-    echo ""
-    echo -e "${GREEN}========================================${NC}"
-    echo -e "${GREEN}    패치 완료!${NC}"
-    echo -e "${GREEN}========================================${NC}"
-    
-    # 1. 디시인사이드 스크립트에서 성공한 'output/out' 폴더 자동 검색 로직 적용
-    local OUTPUT_APK=""
-    if [ -f "output/patched.apk" ]; then
-        OUTPUT_APK="output/patched.apk"
-    elif [ -f "out/patched.apk" ]; then
-        OUTPUT_APK="out/patched.apk"
+    # patches.json 다운로드 시도 (없을 수도 있음)
+    echo -e "${YELLOW}[CHECK] patches.json 확인 중...${NC}"
+    local json_url=$(curl -s "https://api.github.com/repos/$PATCHES_REPO/releases/latest" | \
+        jq -r ".assets[] | select(.name | test(\"json\")) | .browser_download_url" | head -n 1)
+        
+    if [ -n "$json_url" ] && [ "$json_url" != "null" ]; then
+        echo -e "⬇️ 다운로드: patches.json"
+        curl -L -o "patches.json" "$json_url"
     else
-        OUTPUT_APK=$(find output out -name "*.apk" -type f 2>/dev/null | head -n 1)
+        echo -e "${YELLOW}[WARN] patches.json 없음. jar 내장 파일 사용.${NC}"
+        rm -f patches.json
     fi
 
-    # 2. 결과물 확인 및 요청하신 경로로 이동
-    if [ -n "$OUTPUT_APK" ] && [ -f "$OUTPUT_APK" ]; then
-        echo -e "${BLUE}[INFO] 결과물을 다운로드 폴더로 이동합니다...${NC}"
-        # 덮어쓰기(-f) 및 요청하신 파일명으로 이동
-        mv -f "$OUTPUT_APK" "/storage/emulated/0/Download/kakaotalkpatch.apk"
-        echo -e "${GREEN}[SUCCESS] 저장 완료: /storage/emulated/0/Download/kakaotalkpatch.apk${NC}"
+    echo ""
+    echo -e "${BLUE}[INFO] 패치 프로세스 시작 (시간이 소요됩니다)...${NC}"
+    
+    local FINAL_OUTPUT="patched_kakao.apk"
+    rm -f "$FINAL_OUTPUT"
+
+    # 2. ReVanced CLI 실행
+    # (주의: CLI 방식은 키스토어 비밀번호가 필요하므로, 여기서는 기본 서명(Debug Key)을 사용합니다.)
+    # (기존 카톡을 삭제하고 설치해야 합니다.)
+    
+    if [ -f "patches.json" ]; then
+        java -jar revanced-cli.jar patch \
+            --patch-bundle patches.jar \
+            --patches-json patches.json \
+            --merge integrations.apk \
+            --out "$FINAL_OUTPUT" \
+            "$MERGED_APK_PATH"
     else
-        echo -e "${YELLOW}[WARN] 결과물 파일을 찾을 수 없습니다. 직접 확인해주세요: $PATCH_SCRIPT_DIR/output 또는 $PATCH_SCRIPT_DIR/out${NC}"
+        java -jar revanced-cli.jar patch \
+            --patch-bundle patches.jar \
+            --merge integrations.apk \
+            --out "$FINAL_OUTPUT" \
+            "$MERGED_APK_PATH"
+    fi
+
+    # 3. 결과 확인 및 이동
+    if [ -f "$FINAL_OUTPUT" ]; then
+        echo ""
+        echo -e "${GREEN}========================================${NC}"
+        echo -e "${GREEN}    패치 완료!${NC}"
+        echo -e "${GREEN}========================================${NC}"
+        
+        local TARGET_PATH="/storage/emulated/0/Download/kakaotalkpatch.apk"
+        mv -f "$FINAL_OUTPUT" "$TARGET_PATH"
+        
+        echo -e "${BLUE}[INFO] 결과물 이동 완료${NC}"
+        echo -e "${GREEN}[SUCCESS] 저장됨: $TARGET_PATH${NC}"
+        echo -e "${YELLOW}* 주의: 서명이 변경되었으므로 기존 카톡을 삭제 후 설치하세요.${NC}"
+    else
+        echo -e "${RED}[ERROR] 패치된 파일이 생성되지 않았습니다. 위 로그를 확인하세요.${NC}"
+        return 1
     fi
 }
 
@@ -209,7 +235,7 @@ run_patch() {
 main() {
     clear
     echo -e "${GREEN}======================================${NC}"
-    echo -e "${GREEN}  카카오톡 APKM 병합 & 패치 (Key Fixed)${NC}"
+    echo -e "${GREEN}  카카오톡 Patcher (Target: footfoot22)${NC}"
     echo -e "${GREEN}======================================${NC}"
     echo ""
     
