@@ -183,12 +183,9 @@ run_patch() {
     echo -e "${BLUE}[INFO] ReVanced CLI로 패치 중... (잠시만 기다려주세요)${NC}"
     
     # AmpleReVanced CLI를 사용하여 커스텀 RVP로 패치 적용
+    # 키스토어는 CLI가 자동 생성하도록 함
     java -jar "$CLI_JAR" patch \
         --patches "$RVP_FILE" \
-        --keystore "$KEYSTORE_FILE" \
-        --keystore-password "android" \
-        --keystore-entry-password "android" \
-        --keystore-entry-alias "alias" \
         --out "$OUTPUT_APK" \
         "$MERGED_APK_PATH" || {
         echo -e "${RED}[ERROR] 패치 과정 중 오류 발생${NC}"
