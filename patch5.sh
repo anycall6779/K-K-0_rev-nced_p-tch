@@ -67,7 +67,7 @@ check_dependencies() {
     
     # 커스텀 RVP 다운로드 (제3자 테마 버그 수정 버전)
     echo -e "${YELLOW}[INFO] 커스텀 패치 파일(RVP) 다운로드 중...${NC}"
-    curl -L -o "$CUSTOM_RVP_FILE" "$CUSTOM_RVP_URL" || {
+    wget --quiet --show-progress -O "$CUSTOM_RVP_FILE" "$CUSTOM_RVP_URL" || {
         echo -e "${RED}[ERROR] RVP 패치 파일 다운로드 실패${NC}"
         MISSING=1
     }
