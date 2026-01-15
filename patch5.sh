@@ -176,14 +176,16 @@ run_patch() {
     # 이전 결과물 삭제
     rm -rf output out
     
-    # build.py에 커스텀 patches 옵션 사용
-    # --patches 옵션으로 커스텀 RVP 파일 지정
+    # 먼저 build.py를 한번 실행하여 의존성(CLI 등)을 다운로드
+    # 그 후 다운로드된 rvp 파일을 커스텀 버전으로 교체
+    echo -e "${YELLOW}[INFO] 의존성 다운로드 및 초기화 중...${NC}"
+    
+    # build.py 실행 (커스텀 RVP로 교체하기 위해 먼저 한번 실행)
     python build.py \
         --apk "$MERGED_APK_PATH" \
         --package "$PKG_NAME" \
         --include-universal \
         --keystore "$KEYSTORE_FILE" \
-        --patches "$RVP_FILE" \
         --run || {
         echo -e "${RED}[ERROR] 패치 과정 중 오류 발생${NC}"
         return 1
