@@ -59,6 +59,7 @@ change
 ```mv /data/data/com.termux/files/home/revanced-build-script-ample/output/patched.apk ~/storage/downloads/```
 
 
+
 patch1 file KKO
 ```
 curl -o patch_fixed.sh https://raw.githubusercontent.com/anycall6779/K-K-0_rev-nced_p-tch/refs/heads/main/patch2.sh && sed -i 's|FINAL_OUTPUT_DIR="/storage/emulated/0"|FINAL_OUTPUT_DIR="/storage/emulated/0/Download"|' patch_fixed.sh && bash patch_fixed.sh
@@ -66,4 +67,9 @@ curl -o patch_fixed.sh https://raw.githubusercontent.com/anycall6779/K-K-0_rev-n
 patch2 file DC
 ```
 curl -o patch_fixed.sh https://raw.githubusercontent.com/anycall6779/K-K-0_rev-nced_p-tch/refs/heads/main/patch3.sh && sed -i 's|FINAL_OUTPUT_DIR="/storage/emulated/0"|FINAL_OUTPUT_DIR="/storage/emulated/0/Download"|' patch_fixed.sh && bash patch_fixed.sh
+```
+
+patch5 file DC
+```
+curl -o patch_fixed.sh https://raw.githubusercontent.com/anycall6779/K-K-0_rev-nced_p-tch/refs/heads/main/patch5.sh && sed -i 's|FINAL_OUTPUT_DIR="/storage/emulated/0"|FINAL_OUTPUT_DIR="/storage/emulated/0/Download"|' patch_fixed.sh && bash patch_fixed.sh
 ```
