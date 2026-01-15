@@ -25,9 +25,9 @@ KEYSTORE_FILE="$WORK_DIR/my_kakao_key.keystore"
 RVP_URL="https://github.com/anycall6779/K-K-0_rev-nced_p-tch/raw/refs/heads/main/patches-5.47.0-ample.2.rvp"
 RVP_FILE="$WORK_DIR/patches-5.47.0-ample.2.rvp"
 
-# ReVanced CLI 설정
-CLI_VERSION="5.0.1"
-CLI_URL="https://github.com/ReVanced/revanced-cli/releases/download/v${CLI_VERSION}/revanced-cli-${CLI_VERSION}-all.jar"
+# ReVanced CLI 설정 (AmpleReVanced 포크 버전 - 호환성 필수!)
+CLI_VERSION="5.0.1-ample.9"
+CLI_URL="https://github.com/AmpleReVanced/revanced-cli/releases/download/v${CLI_VERSION}/revanced-cli-${CLI_VERSION}-all.jar"
 CLI_JAR="$WORK_DIR/revanced-cli-${CLI_VERSION}-all.jar"
 
 # Get device info
