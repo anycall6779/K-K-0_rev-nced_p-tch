@@ -1,7 +1,7 @@
 #!/bin/bash
 #
-# Simplified APKM Merger + Patcher for KakaoTalk (AmpleReVanced Edition)
-# (Modified: Enforces Custom Keystore for Consistent Signing)
+# KakaoTalk APKM 병합 + 패치 스크립트 (커스텀 RVP 강제 사용)
+# 제3자 테마 버그 수정 버전
 #
 set -e
 
@@ -15,41 +15,40 @@ NC='\033[0m'
 # Configuration
 PKG_NAME="com.kakao.talk"
 BASE_DIR="/storage/emulated/0/Download"
-PATCH_SCRIPT_DIR="$HOME/revanced-build-script-ample"
-MERGED_APK_PATH="$HOME/Downloads/KakaoTalk_Merged.apk"
-EDITOR_JAR="$BASE_DIR/APKEditor-1.4.5.jar"
+WORK_DIR="$HOME/kakao-revanced-patch"
+MERGED_APK_PATH="$WORK_DIR/KakaoTalk_Merged.apk"
+EDITOR_JAR="$WORK_DIR/APKEditor-1.4.5.jar"
+
+# 커스텀 RVP (제3자 테마 버그 수정 버전) - 이 URL을 GitHub에 업로드한 파일로 변경
+CUSTOM_RVP_URL="https://github.com/anycall6779/K-K-0_rev-nced_p-tch/raw/refs/heads/main/patches-5.47.0-ample.2.rvp"
+CUSTOM_RVP_FILE="$WORK_DIR/patches-custom.rvp"
+
+# AmpleReVanced CLI
+CLI_URL="https://github.com/AmpleReVanced/revanced-cli/releases/download/v5.0.1-ample.9/revanced-cli-5.0.1-ample.9-all.jar"
+CLI_JAR="$WORK_DIR/revanced-cli.jar"
 
 # 키스토어 설정
 KEYSTORE_URL="https://github.com/anycall6779/K-K-0_rev-nced_p-tch/raw/refs/heads/main/my_kakao_key.keystore"
-KEYSTORE_FILE="my_kakao_key.keystore"
+KEYSTORE_FILE="$WORK_DIR/my_kakao_key.keystore"
 
 # Get device info
-ARCH=$(getprop ro.product.cpu.abi)
-[ "$ARCH" = "arm64-v8a" ] && ARCH_APK="arm64" || ARCH_APK="armeabi"
+ARCH=$(getprop ro.product.cpu.abi 2>/dev/null || echo "arm64-v8a")
 
 # --- Dependency Check ---
 check_dependencies() {
     echo -e "${BLUE}[INFO] 필수 도구 확인 중...${NC}"
     local MISSING=0
     
-    for cmd in curl wget unzip java python git; do
+    for cmd in curl wget unzip java; do
         if ! command -v $cmd &> /dev/null; then
             echo -e "${RED}[ERROR] '$cmd' 가 없습니다. 설치 명령어: pkg install $cmd${NC}"
             MISSING=1
         fi
     done
     
-    if [ ! -d "$PATCH_SCRIPT_DIR" ]; then
-        echo -e "${YELLOW}[INFO] AmpleReVanced 빌드 스크립트 다운로드 중...${NC}"
-        git clone https://github.com/AmpleReVanced/revanced-build-script.git "$PATCH_SCRIPT_DIR" || {
-            echo -e "${RED}[ERROR] 빌드 스크립트 다운로드 실패${NC}"
-            MISSING=1
-        }
-    else
-        echo -e "${YELLOW}[INFO] 빌드 스크립트 업데이트 확인 중...${NC}"
-        git -C "$PATCH_SCRIPT_DIR" pull
-    fi
+    mkdir -p "$WORK_DIR"
     
+    # APKEditor 다운로드
     if [ ! -f "$EDITOR_JAR" ]; then
         echo -e "${YELLOW}[INFO] APKEditor 다운로드 중...${NC}"
         wget --quiet --show-progress -O "$EDITOR_JAR" \
@@ -59,8 +58,28 @@ check_dependencies() {
         }
     fi
     
+    # ReVanced CLI 다운로드
+    echo -e "${YELLOW}[INFO] AmpleReVanced CLI 다운로드 중...${NC}"
+    wget --quiet --show-progress -O "$CLI_JAR" "$CLI_URL" || {
+        echo -e "${RED}[ERROR] CLI 다운로드 실패${NC}"
+        MISSING=1
+    }
+    
+    # 커스텀 RVP 다운로드 (제3자 테마 버그 수정 버전)
+    echo -e "${YELLOW}[INFO] 커스텀 패치 파일(RVP) 다운로드 중...${NC}"
+    curl -L -o "$CUSTOM_RVP_FILE" "$CUSTOM_RVP_URL" || {
+        echo -e "${RED}[ERROR] RVP 패치 파일 다운로드 실패${NC}"
+        MISSING=1
+    }
+    
+    # 키스토어 다운로드
+    echo -e "${YELLOW}[INFO] 키스토어 다운로드 중...${NC}"
+    curl -L -o "$KEYSTORE_FILE" "$KEYSTORE_URL" || {
+        echo -e "${RED}[ERROR] 키스토어 다운로드 실패${NC}"
+        MISSING=1
+    }
+    
     [ $MISSING -eq 1 ] && exit 1
-    mkdir -p "$HOME/Downloads"
     echo -e "${GREEN}[OK] 모든 준비 완료${NC}"
 }
 
@@ -114,7 +133,7 @@ get_apkm_file() {
 merge_apkm() {
     echo ""
     echo -e "${BLUE}[INFO] APKM 파일 병합 시작...${NC}"
-    local TEMP_DIR="$BASE_DIR/kakao_temp_merge"
+    local TEMP_DIR="$WORK_DIR/kakao_temp_merge"
     rm -rf "$TEMP_DIR" && mkdir -p "$TEMP_DIR"
     
     unzip -qqo "$APKM_FILE" -d "$TEMP_DIR" 2>/dev/null || {
@@ -148,32 +167,30 @@ merge_apkm() {
     return 0
 }
 
-# --- Run Patch (AmpleReVanced) ---
+# --- Run Patch ---
 run_patch() {
     echo ""
     echo -e "${GREEN}========================================${NC}"
-    echo -e "${GREEN}    AmpleReVanced 패치 시작...${NC}"
+    echo -e "${GREEN}    커스텀 RVP로 패치 시작...${NC}"
+    echo -e "${GREEN}    (제3자 테마 버그 수정 버전)${NC}"
     echo -e "${GREEN}========================================${NC}"
     
-    cd "$PATCH_SCRIPT_DIR"
+    cd "$WORK_DIR"
     
-    # 깃허브에서 고정 키스토어 다운로드
-    echo -e "${YELLOW}[INFO] 고정 키스토어(my_kakao_key.keystore) 다운로드 중...${NC}"
-    curl -L -o "$KEYSTORE_FILE" "$KEYSTORE_URL" || {
-        echo -e "${RED}[ERROR] 키스토어 다운로드 실패! 인터넷 연결이나 URL을 확인하세요.${NC}"
-        return 1
-    }
-
-    # 이전 결과물 삭제
-    rm -rf output out
+    local OUTPUT_APK="$WORK_DIR/kakaotalk-patched.apk"
+    rm -f "$OUTPUT_APK"
     
-    # build.py 실행
-    python build.py \
-        --apk "$MERGED_APK_PATH" \
-        --package "$PKG_NAME" \
-        --include-universal \
+    echo -e "${BLUE}[INFO] ReVanced CLI로 패치 중... (잠시만 기다려주세요)${NC}"
+    
+    # ReVanced CLI를 사용하여 커스텀 RVP로 패치 적용
+    java -jar "$CLI_JAR" patch \
+        --patches "$CUSTOM_RVP_FILE" \
         --keystore "$KEYSTORE_FILE" \
-        --run || {
+        --keystore-password "android" \
+        --keystore-entry-password "android" \
+        --keystore-entry-alias "alias" \
+        --out "$OUTPUT_APK" \
+        "$MERGED_APK_PATH" || {
         echo -e "${RED}[ERROR] 패치 과정 중 오류 발생${NC}"
         return 1
     }
@@ -183,22 +200,13 @@ run_patch() {
     echo -e "${GREEN}    패치 완료!${NC}"
     echo -e "${GREEN}========================================${NC}"
     
-    # 결과물 검색 및 이동
-    local OUTPUT_APK=""
-    if [ -f "output/patched.apk" ]; then
-        OUTPUT_APK="output/patched.apk"
-    elif [ -f "out/patched.apk" ]; then
-        OUTPUT_APK="out/patched.apk"
-    else
-        OUTPUT_APK=$(find output out -name "*.apk" -type f 2>/dev/null | head -n 1)
-    fi
-
-    if [ -n "$OUTPUT_APK" ] && [ -f "$OUTPUT_APK" ]; then
+    # 결과물 확인 및 이동
+    if [ -f "$OUTPUT_APK" ]; then
         echo -e "${BLUE}[INFO] 결과물을 다운로드 폴더로 이동합니다...${NC}"
         mv -f "$OUTPUT_APK" "/storage/emulated/0/Download/kakaotalkpatch.apk"
         echo -e "${GREEN}[SUCCESS] 저장 완료: /storage/emulated/0/Download/kakaotalkpatch.apk${NC}"
     else
-        echo -e "${YELLOW}[WARN] 결과물 파일을 찾을 수 없습니다. 직접 확인해주세요: $PATCH_SCRIPT_DIR/output 또는 $PATCH_SCRIPT_DIR/out${NC}"
+        echo -e "${YELLOW}[WARN] 결과물 파일을 찾을 수 없습니다.${NC}"
     fi
 }
 
@@ -206,7 +214,7 @@ run_patch() {
 main() {
     clear
     echo -e "${GREEN}======================================${NC}"
-    echo -e "${GREEN}  카카오톡 APKM 병합 & 패치 (Key Fixed)${NC}"
+    echo -e "${GREEN}  카카오톡 패치 (테마 버그 수정 버전)${NC}"
     echo -e "${GREEN}======================================${NC}"
     echo ""
     
