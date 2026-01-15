@@ -19,11 +19,9 @@ PATCH_SCRIPT_DIR="$HOME/revanced-build-script-ample"
 MERGED_APK_PATH="$HOME/Downloads/KakaoTalk_Merged.apk"
 EDITOR_JAR="$BASE_DIR/APKEditor-1.4.5.jar"
 
-# [추가됨] 키스토어 및 커스텀 RVP 설정
+# 키스토어 설정
 KEYSTORE_URL="https://github.com/anycall6779/K-K-0_rev-nced_p-tch/raw/refs/heads/main/my_kakao_key.keystore"
 KEYSTORE_FILE="my_kakao_key.keystore"
-RVP_URL="https://github.com/anycall6779/K-K-0_rev-nced_p-tch/raw/refs/heads/main/patches-5.47.0-ample.2.rvp"
-RVP_FILE="patches-5.47.0-ample.2.rvp"
 
 # Get device info
 ARCH=$(getprop ro.product.cpu.abi)
@@ -150,7 +148,7 @@ merge_apkm() {
     return 0
 }
 
-# --- Run Patch (AmpleReVanced with custom RVP) ---
+# --- Run Patch (AmpleReVanced) ---
 run_patch() {
     echo ""
     echo -e "${GREEN}========================================${NC}"
@@ -165,22 +163,11 @@ run_patch() {
         echo -e "${RED}[ERROR] 키스토어 다운로드 실패! 인터넷 연결이나 URL을 확인하세요.${NC}"
         return 1
     }
-    
-    # 커스텀 RVP 파일 다운로드 (제3자 테마 버그 수정 버전)
-    echo -e "${YELLOW}[INFO] 커스텀 패치 파일(RVP) 다운로드 중...${NC}"
-    curl -L -o "$RVP_FILE" "$RVP_URL" || {
-        echo -e "${RED}[ERROR] RVP 패치 파일 다운로드 실패!${NC}"
-        return 1
-    }
 
     # 이전 결과물 삭제
     rm -rf output out
     
-    # 먼저 build.py를 한번 실행하여 의존성(CLI 등)을 다운로드
-    # 그 후 다운로드된 rvp 파일을 커스텀 버전으로 교체
-    echo -e "${YELLOW}[INFO] 의존성 다운로드 및 초기화 중...${NC}"
-    
-    # build.py 실행 (커스텀 RVP로 교체하기 위해 먼저 한번 실행)
+    # build.py 실행
     python build.py \
         --apk "$MERGED_APK_PATH" \
         --package "$PKG_NAME" \
@@ -219,7 +206,7 @@ run_patch() {
 main() {
     clear
     echo -e "${GREEN}======================================${NC}"
-    echo -e "${GREEN}  카카오톡 APKM 병합 & 패치 (Custom RVP)${NC}"
+    echo -e "${GREEN}  카카오톡 APKM 병합 & 패치 (Key Fixed)${NC}"
     echo -e "${GREEN}======================================${NC}"
     echo ""
     
