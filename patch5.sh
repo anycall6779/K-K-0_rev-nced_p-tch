@@ -1,7 +1,7 @@
 #!/bin/bash
 #
-# KakaoTalk APKM 병합 + 패치 스크립트 (커스텀 RVP 강제 사용)
-# 제3자 테마 버그 수정 버전
+# Simplified APKM Merger + Patcher for KakaoTalk (AmpleReVanced Edition)
+# (Modified: Uses Custom RVP + Keystore from GitHub)
 #
 set -e
 
@@ -15,24 +15,22 @@ NC='\033[0m'
 # Configuration
 PKG_NAME="com.kakao.talk"
 BASE_DIR="/storage/emulated/0/Download"
-WORK_DIR="$HOME/kakao-revanced-patch"
-MERGED_APK_PATH="$WORK_DIR/KakaoTalk_Merged.apk"
-EDITOR_JAR="$WORK_DIR/APKEditor-1.4.5.jar"
+WORK_DIR="$HOME/revanced-kakao-patch"
+MERGED_APK_PATH="$HOME/Downloads/KakaoTalk_Merged.apk"
+EDITOR_JAR="$BASE_DIR/APKEditor-1.4.5.jar"
 
-# 커스텀 RVP (제3자 테마 버그 수정 버전) - 이 URL을 GitHub에 업로드한 파일로 변경
-CUSTOM_RVP_URL="https://github.com/anycall6779/K-K-0_rev-nced_p-tch/raw/refs/heads/main/patches-5.47.0-ample.2.rvp"
-CUSTOM_RVP_FILE="$WORK_DIR/patches-custom.rvp"
-
-# AmpleReVanced CLI
-CLI_URL="https://github.com/AmpleReVanced/revanced-cli/releases/download/v5.0.1-ample.9/revanced-cli-5.0.1-ample.9-all.jar"
-CLI_JAR="$WORK_DIR/revanced-cli.jar"
-
-# 키스토어 설정
+# GitHub 파일 URL (키스토어 + RVP)
 KEYSTORE_URL="https://github.com/anycall6779/K-K-0_rev-nced_p-tch/raw/refs/heads/main/my_kakao_key.keystore"
+RVP_URL="https://github.com/anycall6779/K-K-0_rev-nced_p-tch/raw/refs/heads/main/patches-5.47.0-ample.2.rvp"
+CLI_URL="https://github.com/AmpleReVanced/revanced-cli/releases/download/v5.0.1-ample.9/revanced-cli-5.0.1-ample.9-all.jar"
+
 KEYSTORE_FILE="$WORK_DIR/my_kakao_key.keystore"
+RVP_FILE="$WORK_DIR/patches-5.47.0-ample.2.rvp"
+CLI_JAR="$WORK_DIR/revanced-cli-5.0.1-ample.9-all.jar"
 
 # Get device info
-ARCH=$(getprop ro.product.cpu.abi 2>/dev/null || echo "arm64-v8a")
+ARCH=$(getprop ro.product.cpu.abi)
+[ "$ARCH" = "arm64-v8a" ] && ARCH_APK="arm64" || ARCH_APK="armeabi"
 
 # --- Dependency Check ---
 check_dependencies() {
@@ -47,6 +45,7 @@ check_dependencies() {
     done
     
     mkdir -p "$WORK_DIR"
+    mkdir -p "$HOME/Downloads"
     
     # APKEditor 다운로드
     if [ ! -f "$EDITOR_JAR" ]; then
@@ -58,24 +57,26 @@ check_dependencies() {
         }
     fi
     
-    # ReVanced CLI 다운로드
-    echo -e "${YELLOW}[INFO] AmpleReVanced CLI 다운로드 중...${NC}"
-    wget --quiet --show-progress -O "$CLI_JAR" "$CLI_URL" || {
-        echo -e "${RED}[ERROR] CLI 다운로드 실패${NC}"
-        MISSING=1
-    }
-    
-    # 커스텀 RVP 다운로드 (제3자 테마 버그 수정 버전)
-    echo -e "${YELLOW}[INFO] 커스텀 패치 파일(RVP) 다운로드 중...${NC}"
-    wget --quiet --show-progress -O "$CUSTOM_RVP_FILE" "$CUSTOM_RVP_URL" || {
-        echo -e "${RED}[ERROR] RVP 패치 파일 다운로드 실패${NC}"
-        MISSING=1
-    }
+    # ReVanced CLI 다운로드 (AmpleReVanced 포크)
+    if [ ! -f "$CLI_JAR" ]; then
+        echo -e "${YELLOW}[INFO] AmpleReVanced CLI 다운로드 중...${NC}"
+        wget --quiet --show-progress -O "$CLI_JAR" "$CLI_URL" || {
+            echo -e "${RED}[ERROR] CLI 다운로드 실패${NC}"
+            MISSING=1
+        }
+    fi
     
     # 키스토어 다운로드
     echo -e "${YELLOW}[INFO] 키스토어 다운로드 중...${NC}"
     curl -L -o "$KEYSTORE_FILE" "$KEYSTORE_URL" || {
         echo -e "${RED}[ERROR] 키스토어 다운로드 실패${NC}"
+        MISSING=1
+    }
+    
+    # RVP 패치 파일 다운로드 (제3자 테마 버그 수정 버전)
+    echo -e "${YELLOW}[INFO] RVP 패치 파일 다운로드 중...${NC}"
+    curl -L -o "$RVP_FILE" "$RVP_URL" || {
+        echo -e "${RED}[ERROR] RVP 패치 파일 다운로드 실패${NC}"
         MISSING=1
     }
     
@@ -133,7 +134,7 @@ get_apkm_file() {
 merge_apkm() {
     echo ""
     echo -e "${BLUE}[INFO] APKM 파일 병합 시작...${NC}"
-    local TEMP_DIR="$WORK_DIR/kakao_temp_merge"
+    local TEMP_DIR="$BASE_DIR/kakao_temp_merge"
     rm -rf "$TEMP_DIR" && mkdir -p "$TEMP_DIR"
     
     unzip -qqo "$APKM_FILE" -d "$TEMP_DIR" 2>/dev/null || {
@@ -167,12 +168,11 @@ merge_apkm() {
     return 0
 }
 
-# --- Run Patch ---
+# --- Run Patch (Using Custom RVP + CLI) ---
 run_patch() {
     echo ""
     echo -e "${GREEN}========================================${NC}"
-    echo -e "${GREEN}    커스텀 RVP로 패치 시작...${NC}"
-    echo -e "${GREEN}    (제3자 테마 버그 수정 버전)${NC}"
+    echo -e "${GREEN}    ReVanced 패치 시작 (Custom RVP)...${NC}"
     echo -e "${GREEN}========================================${NC}"
     
     cd "$WORK_DIR"
@@ -182,9 +182,9 @@ run_patch() {
     
     echo -e "${BLUE}[INFO] ReVanced CLI로 패치 중... (잠시만 기다려주세요)${NC}"
     
-    # ReVanced CLI를 사용하여 커스텀 RVP로 패치 적용
+    # AmpleReVanced CLI를 사용하여 커스텀 RVP로 패치 적용
     java -jar "$CLI_JAR" patch \
-        --patches "$CUSTOM_RVP_FILE" \
+        --patches "$RVP_FILE" \
         --keystore "$KEYSTORE_FILE" \
         --keystore-password "android" \
         --keystore-entry-password "android" \
@@ -200,13 +200,13 @@ run_patch() {
     echo -e "${GREEN}    패치 완료!${NC}"
     echo -e "${GREEN}========================================${NC}"
     
-    # 결과물 확인 및 이동
+    # 결과물 확인 및 다운로드 폴더로 이동
     if [ -f "$OUTPUT_APK" ]; then
         echo -e "${BLUE}[INFO] 결과물을 다운로드 폴더로 이동합니다...${NC}"
         mv -f "$OUTPUT_APK" "/storage/emulated/0/Download/kakaotalkpatch.apk"
         echo -e "${GREEN}[SUCCESS] 저장 완료: /storage/emulated/0/Download/kakaotalkpatch.apk${NC}"
     else
-        echo -e "${YELLOW}[WARN] 결과물 파일을 찾을 수 없습니다.${NC}"
+        echo -e "${YELLOW}[WARN] 결과물 파일을 찾을 수 없습니다. 직접 확인해주세요: $WORK_DIR${NC}"
     fi
 }
 
@@ -214,7 +214,7 @@ run_patch() {
 main() {
     clear
     echo -e "${GREEN}======================================${NC}"
-    echo -e "${GREEN}  카카오톡 패치 (테마 버그 수정 버전)${NC}"
+    echo -e "${GREEN}  카카오톡 APKM 병합 & 패치 (Custom RVP)${NC}"
     echo -e "${GREEN}======================================${NC}"
     echo ""
     
