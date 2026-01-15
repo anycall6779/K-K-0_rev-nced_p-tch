@@ -66,12 +66,18 @@ check_dependencies() {
         }
     fi
     
-    # 키스토어 다운로드
-    echo -e "${YELLOW}[INFO] 키스토어 다운로드 중...${NC}"
-    curl -L -o "$KEYSTORE_FILE" "$KEYSTORE_URL" || {
-        echo -e "${RED}[ERROR] 키스토어 다운로드 실패${NC}"
-        MISSING=1
-    }
+    # 기존 Termux 키스토어 확인 또는 다운로드
+    LOCAL_KEYSTORE="$HOME/revanced-build-script-ample/my_kakao_key.keystore"
+    if [ -f "$LOCAL_KEYSTORE" ]; then
+        echo -e "${GREEN}[INFO] 기존 키스토어 발견: $LOCAL_KEYSTORE${NC}"
+        cp "$LOCAL_KEYSTORE" "$KEYSTORE_FILE"
+    else
+        echo -e "${YELLOW}[INFO] 키스토어 다운로드 중...${NC}"
+        curl -L -o "$KEYSTORE_FILE" "$KEYSTORE_URL" || {
+            echo -e "${RED}[ERROR] 키스토어 다운로드 실패${NC}"
+            MISSING=1
+        }
+    fi
     
     # RVP 패치 파일 다운로드 (제3자 테마 버그 수정 버전)
     echo -e "${YELLOW}[INFO] RVP 패치 파일 다운로드 중...${NC}"
@@ -183,9 +189,12 @@ run_patch() {
     echo -e "${BLUE}[INFO] ReVanced CLI로 패치 중... (잠시만 기다려주세요)${NC}"
     
     # AmpleReVanced CLI를 사용하여 커스텀 RVP로 패치 적용
-    # 키스토어는 CLI가 자동 생성하도록 함
     java -jar "$CLI_JAR" patch \
         --patches "$RVP_FILE" \
+        --keystore "$KEYSTORE_FILE" \
+        --keystore-password "ReVanced" \
+        --keystore-entry-password "ReVanced" \
+        --keystore-entry-alias "alias" \
         --out "$OUTPUT_APK" \
         "$MERGED_APK_PATH" || {
         echo -e "${RED}[ERROR] 패치 과정 중 오류 발생${NC}"
