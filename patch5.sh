@@ -59,14 +59,14 @@ check_dependencies() {
         }
     fi
     
-    # ReVanced CLI 다운로드
-    if [ ! -f "$CLI_JAR" ]; then
-        echo -e "${YELLOW}[INFO] ReVanced CLI 다운로드 중...${NC}"
-        wget --quiet --show-progress -O "$CLI_JAR" "$CLI_URL" || {
-            echo -e "${RED}[ERROR] ReVanced CLI 다운로드 실패${NC}"
-            MISSING=1
-        }
-    fi
+    # ReVanced CLI 다운로드 (기존 파일 삭제 후 재다운로드)
+    # 이전 버전이나 손상된 파일 삭제
+    rm -f "$WORK_DIR"/revanced-cli-*.jar 2>/dev/null
+    echo -e "${YELLOW}[INFO] ReVanced CLI 다운로드 중...${NC}"
+    wget --quiet --show-progress -O "$CLI_JAR" "$CLI_URL" || {
+        echo -e "${RED}[ERROR] ReVanced CLI 다운로드 실패${NC}"
+        MISSING=1
+    }
     
     # RVP 패치 파일 다운로드
     echo -e "${YELLOW}[INFO] RVP 패치 파일 다운로드 중...${NC}"
