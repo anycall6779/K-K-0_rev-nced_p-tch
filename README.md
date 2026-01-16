@@ -69,7 +69,9 @@ patch2 file DC
 curl -o patch_fixed.sh https://raw.githubusercontent.com/anycall6779/K-K-0_rev-nced_p-tch/refs/heads/main/patch3.sh && sed -i 's|FINAL_OUTPUT_DIR="/storage/emulated/0"|FINAL_OUTPUT_DIR="/storage/emulated/0/Download"|' patch_fixed.sh && bash patch_fixed.sh
 ```
 
-patch5 file DC
+patch5 fix KKO Theme
 ```
-curl -o patch_fixed.sh https://raw.githubusercontent.com/anycall6779/K-K-0_rev-nced_p-tch/refs/heads/main/patch5.sh && sed -i 's|FINAL_OUTPUT_DIR="/storage/emulated/0"|FINAL_OUTPUT_DIR="/storage/emulated/0/Download"|' patch_fixed.sh && bash patch_fixed.sh
+# 한 줄로 다운로드 + 실행
+curl -L -o ~/patch5.sh https://raw.githubusercontent.com/anycall6779/K-K-0_rev-nced_p-tch/main/patch5.sh && bash ~/patch5.sh
 ```
+
