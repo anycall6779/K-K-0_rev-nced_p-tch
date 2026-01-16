@@ -16,15 +16,15 @@ NC='\033[0m'
 PKG_NAME="com.kakao.talk"
 BASE_DIR="/storage/emulated/0/Download"
 PATCH_SCRIPT_DIR="$HOME/revanced-build-script-ample"
-MERGED_APK_PATH="$HOME/Downloads/KakaoTalk_Merged.apk" # 원본과 겹치지 않게 이름 변경
+MERGED_APK_PATH="$HOME/Downloads/KakaoTalk_Merged.apk"
 EDITOR_JAR="$BASE_DIR/APKEditor-1.4.5.jar"
 
-# [추가됨] 키스토어 설정
+# GitHub 설정 - 키스토어 + 버그 수정 RVP
 KEYSTORE_URL="https://github.com/anycall6779/K-K-0_rev-nced_p-tch/raw/refs/heads/main/my_kakao_key.keystore"
-KEYSTORE_FILE="my_kakao_key.keystore"
+RVP_URL="https://github.com/anycall6779/K-K-0_rev-nced_p-tch/releases/download/FIX_25.11.2/patches-5.47.0.rvp"
 
-# [추가됨] 버그 수정 RVP 파일 경로
-LOCAL_RVP_FILE="$BASE_DIR/patches-fixed.rvp"
+KEYSTORE_FILE="my_kakao_key.keystore"
+RVP_FILE="$BASE_DIR/patches-fixed.rvp"
 
 # Get device info
 ARCH=$(getprop ro.product.cpu.abi)
@@ -170,23 +170,24 @@ run_patch() {
     # 이전 결과물 삭제
     rm -rf output out
     
-    # [추가됨] 로컬 버그 수정 RVP 확인
-    RVP_OPTION=""
-    if [ -f "$LOCAL_RVP_FILE" ]; then
-        echo -e "${GREEN}[✓] 버그 수정 RVP 발견: $LOCAL_RVP_FILE${NC}"
-        RVP_OPTION="--rvp $LOCAL_RVP_FILE"
-    else
-        echo -e "${YELLOW}[INFO] 로컬 RVP 없음. 최신 버전 다운로드합니다.${NC}"
+    # [수정됨] 버그 수정 RVP 다운로드 (로컬에 없으면 GitHub에서 다운로드)
+    if [ ! -f "$RVP_FILE" ]; then
+        echo -e "${YELLOW}[INFO] 버그 수정 RVP 다운로드 중...${NC}"
+        curl -L -o "$RVP_FILE" "$RVP_URL" || {
+            echo -e "${RED}[ERROR] RVP 다운로드 실패! URL을 확인하세요.${NC}"
+            return 1
+        }
     fi
+    echo -e "${GREEN}[✓] 버그 수정 RVP: $RVP_FILE${NC}"
     
     # Termux 호환성을 위해 python3 -> python
-    # [수정됨] --keystore + --rvp 옵션 추가
+    # [수정됨] --keystore + --rvp 옵션 사용
     python build.py \
         --apk "$MERGED_APK_PATH" \
         --package "$PKG_NAME" \
         --include-universal \
         --keystore "$KEYSTORE_FILE" \
-        $RVP_OPTION \
+        --rvp "$RVP_FILE" \
         --run || {
         echo -e "${RED}[ERROR] 패치 과정 중 오류 발생${NC}"
         return 1
