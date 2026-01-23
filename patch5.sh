@@ -19,12 +19,106 @@ PATCH_SCRIPT_DIR="$HOME/revanced-build-script-ample"
 MERGED_APK_PATH="$HOME/Downloads/KakaoTalk_Merged.apk"
 EDITOR_JAR="$BASE_DIR/APKEditor-1.4.5.jar"
 
-# GitHub 설정 - 키스토어 + 버그 수정 RVP
+# GitHub 설정 - 키스토어
 KEYSTORE_URL="https://github.com/anycall6779/K-K-0_rev-nced_p-tch/raw/refs/heads/main/my_kakao_key.keystore"
-RVP_URL="https://github.com/anycall6779/K-K-0_rev-nced_p-tch/releases/download/FIX_25.11.2/patches-5.47.0.rvp"
+GITHUB_REPO="anycall6779/K-K-0_rev-nced_p-tch"
+GITHUB_API_URL="https://api.github.com/repos/$GITHUB_REPO/releases"
 
 KEYSTORE_FILE="my_kakao_key.keystore"
 RVP_FILE="$BASE_DIR/patches-fixed.rvp"
+
+# --- Fetch RVP from GitHub Releases ---
+fetch_rvp_from_github() {
+    echo ""
+    echo -e "${YELLOW}==================================${NC}"
+    echo -e "${GREEN}RVP 파일 선택 (GitHub Releases)${NC}"
+    echo -e "${YELLOW}==================================${NC}"
+    echo ""
+    
+    echo -e "${BLUE}[INFO] GitHub 릴리스 정보 가져오는 중...${NC}"
+    
+    # 최근 10개 릴리스 가져오기
+    local RELEASES_JSON=$(curl -s "$GITHUB_API_URL?per_page=10" 2>/dev/null)
+    
+    if [ -z "$RELEASES_JSON" ] || echo "$RELEASES_JSON" | grep -q '"message"'; then
+        echo -e "${RED}[ERROR] GitHub API 요청 실패. 인터넷 연결을 확인하세요.${NC}"
+        return 1
+    fi
+    
+    # 릴리스 정보 파싱 (tag_name과 .rvp 파일 URL)
+    local RELEASE_TAGS=()
+    local RVP_URLS=()
+    local RVP_NAMES=()
+    
+    # jq가 있으면 사용, 없으면 grep/sed로 파싱
+    if command -v jq &> /dev/null; then
+        while IFS= read -r line; do
+            RELEASE_TAGS+=("$line")
+        done < <(echo "$RELEASES_JSON" | jq -r '.[].tag_name')
+        
+        while IFS= read -r line; do
+            RVP_URLS+=("$line")
+        done < <(echo "$RELEASES_JSON" | jq -r '.[] | .assets[] | select(.name | endswith(".rvp") and (contains("sources") | not) and (contains("javadoc") | not)) | .browser_download_url' | head -10)
+        
+        while IFS= read -r line; do
+            RVP_NAMES+=("$line")
+        done < <(echo "$RELEASES_JSON" | jq -r '.[] | .assets[] | select(.name | endswith(".rvp") and (contains("sources") | not) and (contains("javadoc") | not)) | .name' | head -10)
+    else
+        # jq 없을 때 기본 파싱 (간단한 grep 사용)
+        while IFS= read -r line; do
+            RELEASE_TAGS+=("$line")
+        done < <(echo "$RELEASES_JSON" | grep -oP '"tag_name"\s*:\s*"\K[^"]+' | head -10)
+        
+        while IFS= read -r line; do
+            # .rvp로 끝나고 sources/javadoc이 아닌 URL만 필터링
+            if [[ "$line" == *.rvp ]] && [[ "$line" != *sources* ]] && [[ "$line" != *javadoc* ]]; then
+                RVP_URLS+=("$line")
+                RVP_NAMES+=("$(basename "$line")")
+            fi
+        done < <(echo "$RELEASES_JSON" | grep -oP '"browser_download_url"\s*:\s*"\K[^"]+\.rvp')
+    fi
+    
+    if [ ${#RVP_URLS[@]} -eq 0 ]; then
+        echo -e "${RED}[ERROR] 사용 가능한 RVP 파일을 찾을 수 없습니다.${NC}"
+        return 1
+    fi
+    
+    echo ""
+    echo -e "${GREEN}사용 가능한 RVP 버전:${NC}"
+    echo -e "  ${BLUE}0.${NC} 최신 버전 자동 선택 (${RVP_NAMES[0]:-첫번째})"
+    for i in "${!RVP_URLS[@]}"; do
+        echo -e "  ${GREEN}$((i+1)).${NC} ${RVP_NAMES[$i]}"
+    done
+    echo ""
+    echo -e "${YELLOW}번호를 입력하세요 (기본: 0 - 최신 버전):${NC}"
+    read -r -p "> " selection
+    
+    # 기본값 또는 0 선택 시 최신 버전
+    if [ -z "$selection" ] || [ "$selection" = "0" ]; then
+        selection=1
+    fi
+    
+    if [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -ge 1 ] && [ "$selection" -le ${#RVP_URLS[@]} ]; then
+        SELECTED_RVP_URL="${RVP_URLS[$((selection-1))]}"
+        SELECTED_RVP_NAME="${RVP_NAMES[$((selection-1))]}"
+        echo -e "${GREEN}[선택됨] ${SELECTED_RVP_NAME}${NC}"
+    else
+        echo -e "${RED}[ERROR] 잘못된 선택입니다. 최신 버전을 사용합니다.${NC}"
+        SELECTED_RVP_URL="${RVP_URLS[0]}"
+        SELECTED_RVP_NAME="${RVP_NAMES[0]}"
+    fi
+    
+    # RVP 다운로드
+    echo -e "${YELLOW}[INFO] RVP 다운로드 중: ${SELECTED_RVP_NAME}...${NC}"
+    rm -f "$RVP_FILE"
+    curl -L -o "$RVP_FILE" "$SELECTED_RVP_URL" || {
+        echo -e "${RED}[ERROR] RVP 다운로드 실패!${NC}"
+        return 1
+    }
+    
+    echo -e "${GREEN}[✓] RVP 다운로드 완료: $RVP_FILE${NC}"
+    return 0
+}
 
 # Get device info
 ARCH=$(getprop ro.product.cpu.abi)
@@ -170,15 +264,11 @@ run_patch() {
     # 이전 결과물 삭제
     rm -rf output out
     
-    # [수정됨] 버그 수정 RVP 다운로드 (로컬에 없으면 GitHub에서 다운로드)
-    if [ ! -f "$RVP_FILE" ]; then
-        echo -e "${YELLOW}[INFO] 버그 수정 RVP 다운로드 중...${NC}"
-        curl -L -o "$RVP_FILE" "$RVP_URL" || {
-            echo -e "${RED}[ERROR] RVP 다운로드 실패! URL을 확인하세요.${NC}"
-            return 1
-        }
-    fi
-    echo -e "${GREEN}[✓] 버그 수정 RVP: $RVP_FILE${NC}"
+    # [수정됨] GitHub Releases에서 RVP 선택 및 다운로드
+    fetch_rvp_from_github || {
+        echo -e "${RED}[ERROR] RVP 선택/다운로드 실패!${NC}"
+        return 1
+    }
     
     # Termux 호환성을 위해 python3 -> python
     # [수정됨] --keystore + --rvp 옵션 사용
