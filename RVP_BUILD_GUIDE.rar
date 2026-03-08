@@ -1,0 +1,199 @@
+# RVP 빌드 인수인계 가이드
+
+> 이 문서는 AmpleReVanced 패치 프로젝트의 RVP 빌드 과정을 다른 AI 또는 개발자가 인수인계 받을 수 있도록 작성되었습니다.
+
+---
+
+## 1. 프로젝트 개요
+
+- **이름**: AmpleReVanced Patches (카카오톡 등 앱 패치)
+- **루트 디렉토리**: `c:\Users\hoho\Desktop\revanced-patches-5.47.0-ample.2\`
+- **빌드 산출물**: `.rvp` 파일 (ReVanced Patch 파일)
+- **빌드 도구**: Gradle (gradlew.bat), Kotlin
+- **버전 관리**: `gradle.properties`의 `version` 속성
+
+### 디렉토리 구조
+
+```
+revanced-patches-5.47.0-ample.2/
+├── V5.50.2-ample.2/          ← 최신 빌드 폴더 (버전별 독립 폴더)
+├── v5.48.0-ample.1/          ← 이전 버전
+├── v5.48.0-ample.4/          ← 이전 버전
+├── build.py                  ← 패치 적용 스크립트 (Termux용)
+├── patch5.sh                 ← APKM 병합 + 패치 쉘 스크립트
+└── ...
+```
+
+각 버전 폴더는 **독립적인 Gradle 프로젝트**입니다. 빌드는 해당 버전 폴더 안에서 실행합니다.
+
+---
+
+## 2. RVP 빌드 절차 (Step-by-Step)
+
+### 2-1. 사전 준비 (새 버전 폴더 생성 시)
+
+새 버전 폴더를 받거나 만들었을 때, 아래 파일들이 반드시 필요합니다:
+
+#### ① `local.properties` 복사
+
+```powershell
+Copy-Item -Path ".\local.properties" -Destination ".\새버전폴더\local.properties"
+```
+
+이 파일은 Android SDK 경로(`sdk.dir`)를 포함합니다. 없으면 빌드 즉시 실패합니다.
+
+#### ② `gradle.properties`에 버전 + 인증 정보 설정
+
+```properties
+org.gradle.caching = true
+org.gradle.jvmargs = -Xms512M -Xmx2048M
+org.gradle.parallel = true
+android.useAndroidX = true
+kotlin.code.style = official
+version = 5.50.2-ample.2
+
+# GitHub Packages 인증 (필수 - 비어있으면 안됨!)
+githubPackagesUsername = x
+githubPackagesPassword = x
+githubPackagesOfficialUsername = x
+githubPackagesOfficialPassword = x
+```
+
+> **중요**: 실제 GitHub 토큰이 있으면 `x` 대신 입력하세요. 없으면 `x`로 두되, 의존성이 로컬에 캐시되어 있어야 빌드 가능합니다.
+
+#### ③ `settings.gradle.kts` 인증 방식 확인/수정
+
+`credentials(PasswordCredentials::class)` 패턴을 발견하면 아래와 같이 변경해야 합니다:
+
+**변경 전** (토큰 필수, 없으면 NPE 발생):
+```kotlin
+credentials(PasswordCredentials::class)
+```
+
+**변경 후** (토큰 없어도 진행 가능):
+```kotlin
+credentials {
+    username = providers.gradleProperty("githubPackagesUsername").orNull
+        ?: System.getenv("GITHUB_ACTOR") ?: ""
+    password = providers.gradleProperty("githubPackagesPassword").orNull
+        ?: System.getenv("GITHUB_TOKEN") ?: ""
+}
+```
+
+이 변경은 `settings.gradle.kts`의 **4개 maven 블록** 모두에 적용해야 합니다.
+`patches/build.gradle.kts`의 publishing 블록도 동일하게 수정합니다.
+
+또한 `mavenLocal()`을 repositories 목록 최상단에 추가합니다:
+```kotlin
+repositories {
+    mavenLocal()  // ← 추가
+    maven { ... }
+}
+```
+
+### 2-2. 빌드 실행
+
+```powershell
+# 1단계: API 선언 업데이트 (패치 코드 변경 시 필수)
+.\gradlew.bat :patches:apiDump `
+  -PgithubPackagesUsername=x `
+  -PgithubPackagesPassword=x `
+  -PgithubPackagesOfficialUsername=x `
+  -PgithubPackagesOfficialPassword=x
+
+# 2단계: 빌드
+.\gradlew.bat :patches:build `
+  -PgithubPackagesUsername=x `
+  -PgithubPackagesPassword=x `
+  -PgithubPackagesOfficialUsername=x `
+  -PgithubPackagesOfficialPassword=x
+```
+
+### 2-3. 산출물 확인
+
+```
+새버전폴더\patches\build\libs\
+├── patches-X.X.X-ample.X.rvp           ← 메인 RVP (약 5MB)
+├── patches-X.X.X-ample.X-sources.rvp   ← 소스
+└── patches-X.X.X-ample.X-javadoc.rvp   ← 문서
+```
+
+---
+
+## 3. 알려진 문제와 해결법
+
+### 문제 1: `Username must not be null!`
+
+**원인**: `PasswordCredentials::class`가 GitHub 토큰을 필수로 요구
+**해결**: 위 2-1 ③번 참고 — credentials fallback 패턴 적용 + gradle.properties에 더미 값
+
+### 문제 2: `Could not resolve app.revanced:revanced-patcher:XX.X.X`
+
+**원인**: 해당 버전의 patcher가 GitHub Packages에만 존재하고, 유효한 토큰 없이 다운로드 불가
+**해결**: 로컬 캐시에 있는 이전 버전 patcher JAR을 복사하여 새 버전으로 설치
+
+```powershell
+# 캐시 확인
+Get-ChildItem "C:\Users\hoho\.gradle\caches\modules-2\files-2.1\app.revanced\revanced-patcher"
+
+# 로컬 Maven에 설치 (예: 21.1.1 → 21.1.5)
+$srcDir = "C:\Users\hoho\.gradle\caches\modules-2\files-2.1\app.revanced\revanced-patcher\21.1.1"
+$destBase = "C:\Users\hoho\.m2\repository\app\revanced\revanced-patcher\21.1.5"
+New-Item -ItemType Directory -Force -Path $destBase | Out-Null
+
+# JAR 복사
+$jar = Get-ChildItem -Recurse $srcDir -Filter "*.jar" | Select-Object -First 1
+Copy-Item $jar.FullName "$destBase\revanced-patcher-21.1.5.jar"
+
+# POM 복사 + 버전 치환
+$pom = Get-ChildItem -Recurse $srcDir -Filter "*.pom" | Select-Object -First 1
+(Get-Content $pom.FullName -Raw) -replace '21\.1\.1','21.1.5' | Set-Content "$destBase\revanced-patcher-21.1.5.pom" -NoNewline
+
+# MODULE 복사 + 버전 치환
+$mod = Get-ChildItem -Recurse $srcDir -Filter "*.module" | Select-Object -First 1
+(Get-Content $mod.FullName -Raw) -replace '21\.1\.1','21.1.5' | Set-Content "$destBase\revanced-patcher-21.1.5.module" -NoNewline
+```
+
+### 문제 3: `API check failed for project patches`
+
+**원인**: 패치 코드가 변경되었는데 API 선언이 업데이트되지 않음
+**해결**: `:patches:build` 전에 반드시 `:patches:apiDump` 먼저 실행
+
+### 문제 4: Duplicate class errors
+
+**원인**: `extensions/kakaotalk/src/` 등에 `- 복사본.java` 파일이 있음
+**해결**: `* - 복사본*` 패턴의 파일을 모두 삭제
+
+```powershell
+Get-ChildItem -Recurse -Filter "*복사본*" | Remove-Item
+```
+
+---
+
+## 4. 핵심 파일 참조
+
+| 파일 | 역할 |
+|---|---|
+| `gradle.properties` | 빌드 버전, GitHub 인증 정보 |
+| `settings.gradle.kts` | 저장소 설정, 플러그인 버전 |
+| `patches/build.gradle.kts` | 패치 빌드/배포 설정 |
+| `gradle/libs.versions.toml` | 의존성 버전 카탈로그 (`revanced-patcher` 버전 등) |
+| `local.properties` | Android SDK 경로 |
+| `build.py` | Termux에서 패치 적용 스크립트 |
+| `patch5.sh` | APKM 병합 + RVP 다운로드 + 패치 쉘 스크립트 |
+
+---
+
+## 5. 빠른 빌드 체크리스트
+
+```
+[ ] local.properties 존재 확인
+[ ] gradle.properties 버전 확인 (version = X.X.X-ample.X)
+[ ] gradle.properties에 githubPackages 인증 값 존재 (빈 값 ❌, 최소 'x')
+[ ] settings.gradle.kts에 PasswordCredentials::class 대신 fallback 패턴 사용
+[ ] settings.gradle.kts에 mavenLocal() 추가됨
+[ ] 필요한 revanced-patcher 버전이 캐시 또는 mavenLocal에 존재
+[ ] 복사본 파일 없음 (* - 복사본*)
+[ ] apiDump 먼저 실행 → build 실행
+[ ] patches/build/libs/에서 .rvp 파일 확인
+```
