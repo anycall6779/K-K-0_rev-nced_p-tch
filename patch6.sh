@@ -246,15 +246,21 @@ merge_apkm() {
     return 0
 }
 
-# --- Run Patch (Morphe) ---
+# --- Run Patch (Morphe + TUI 메뉴) ---
 run_patch() {
     echo ""
     echo -e "${GREEN}========================================${NC}"
-    echo -e "${GREEN}    Morphe 패치 시작...${NC}"
+    echo -e "${GREEN}    Morphe 패치 시작... (패치 메뉴 로딩)${NC}"
     echo -e "${GREEN}========================================${NC}"
     
-    cd "$PATCH_SCRIPT_DIR"
-    
+    # 파이썬 기반 TUI 다운로드
+    if [ ! -d "$PATCH_SCRIPT_DIR/revanced-build-script" ]; then
+        echo -e "${YELLOW}[INFO] 패치 선택기(AmpleReVanced UI) 다운로드 중...${NC}"
+        git clone https://github.com/AmpleReVanced/revanced-build-script.git "$PATCH_SCRIPT_DIR/revanced-build-script" -q
+    else
+        git -C "$PATCH_SCRIPT_DIR/revanced-build-script" pull -q
+    fi
+
     echo -e "${YELLOW}[INFO] 고정 키스토어(my_kakao_key.keystore) 다운로드 중...${NC}"
     if [ ! -f "$KEYSTORE_FILE" ]; then
         curl -L -s -o "$KEYSTORE_FILE" "$KEYSTORE_URL" || {
@@ -262,16 +268,45 @@ run_patch() {
             return 1
         }
     fi
-
-    local OUTPUT_APK="$PATCH_SCRIPT_DIR/patched.apk"
-    rm -f "$OUTPUT_APK"
     
-    echo -e "${BLUE}[INFO] morphe-cli 실행 중...${NC}"
-    java -jar "$MORPHE_CLI_JAR" patch \
-        -p "$MPP_FILE" \
-        -o "$OUTPUT_APK" \
+    # build.py 스크립트 실행 폴더로 이동
+    cd "$PATCH_SCRIPT_DIR/revanced-build-script"
+    
+    # 이전 잔재 삭제
+    rm -rf output out
+    
+    # 파이썬 코드를 핫픽스하여 최신 Morphe 엔진과 호환되게 만듭니다 (자동 다운로드 우회)
+    cat << 'EOF' > fix_build.py
+import os, re
+with open('build.py', 'r', encoding='utf-8') as f: code = f.read()
+code = code.replace("tag_cli, assets_cli = get_latest_release(CLI_RELEASE_URL)", "raise ConnectionError()")
+code = code.replace("url_cli, name_cli = pick_cli_jar_download_url(assets_cli)", "pass")
+code = code.replace("dest_cli = os.path.join(args.output, name_cli)", "dest_cli = os.environ.get('MORPHE_CLI_JAR'); url_cli = ''")
+code = code.replace("download_file(url_cli, dest_cli)", "pass")
+code = code.replace("tag_patches, assets_patches = get_latest_release(PATCHES_RELEASE_URL)", "raise ConnectionError()")
+code = code.replace("url_rvp, name_rvp = pick_patches_rvp_download_url(assets_patches)", "pass")
+code = code.replace("dest_rvp = os.path.join(args.output, name_rvp)", "dest_rvp = os.environ.get('MPP_FILE'); url_rvp = ''")
+code = code.replace("download_file(url_rvp, dest_rvp)", "pass")
+code = re.sub(r'except ConnectionError as e:\s*print.*?sys\.exit\(2\)', 'except ConnectionError:\n        pass', code, flags=re.DOTALL)
+code = code.replace("cmd.append(rvp_path)", "cmd.extend(['--patches', rvp_path])")
+with open('build.py', 'w', encoding='utf-8') as f: f.write(code)
+EOF
+    python fix_build.py
+
+    echo -e "${BLUE}[INFO] 패치 선택 메뉴를 엽니다...${NC}"
+
+    export MORPHE_CLI_JAR="$MORPHE_CLI_JAR"
+    export MPP_FILE="$MPP_FILE"
+
+    python build.py \
+        --apk "$MERGED_APK_PATH" \
+        --package "$PKG_NAME" \
+        --include-universal \
         --keystore "$KEYSTORE_FILE" \
-        "$MERGED_APK_PATH" || {
+        --key-alias "revanced" \
+        --keystore-password "android" \
+        --key-password "android" \
+        --run || {
         echo -e "${RED}[ERROR] 패치 과정 중 오류 발생${NC}"
         return 1
     }
@@ -281,7 +316,17 @@ run_patch() {
     echo -e "${GREEN}    패치 완료!${NC}"
     echo -e "${GREEN}========================================${NC}"
     
-    if [ -f "$OUTPUT_APK" ]; then
+    # 결과물 찾기 및 복사
+    local OUTPUT_APK=""
+    if [ -f "output/patched.apk" ]; then
+        OUTPUT_APK="output/patched.apk"
+    elif [ -f "out/patched.apk" ]; then
+        OUTPUT_APK="out/patched.apk"
+    else
+        OUTPUT_APK=$(find output out -name "*.apk" -type f 2>/dev/null | head -n 1)
+    fi
+
+    if [ -n "$OUTPUT_APK" ] && [ -f "$OUTPUT_APK" ]; then
         echo -e "${BLUE}[INFO] 결과물을 다운로드 폴더로 이동합니다...${NC}"
         mv -f "$OUTPUT_APK" "$BASE_DIR/kakaotalkpatch.apk"
         echo -e "${GREEN}[SUCCESS] 저장 완료: $BASE_DIR/kakaotalkpatch.apk${NC}"
