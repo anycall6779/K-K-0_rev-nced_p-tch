@@ -189,7 +189,7 @@ merge_apkm() {
         echo -e "${RED}[ERROR] 병합된 파일 생성 실패${NC}"
         rm -rf "$TEMP_DIR"
         return 1
-    }
+    fi
     
     echo -e "${GREEN}[SUCCESS] 병합 완료: $(basename "$MERGED_APK_PATH")${NC}"
     rm -rf "$TEMP_DIR"
