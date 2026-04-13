@@ -75,3 +75,7 @@ patch5 fix KKO Theme
 curl -L -o ~/patch5.sh https://raw.githubusercontent.com/anycall6779/K-K-0_rev-nced_p-tch/main/patch5.sh && bash ~/patch5.sh
 ```
 
+mpp patch6
+```
+curl -L -o ~/patch6.sh https://raw.githubusercontent.com/anycall6779/K-K-0_rev-nced_p-tch/main/patch6.sh && bash ~/patch6.sh
+```
