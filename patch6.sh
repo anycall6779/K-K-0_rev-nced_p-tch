@@ -19,10 +19,13 @@ PATCH_SCRIPT_DIR="$HOME/morphe-build-script"
 MERGED_APK_PATH="$HOME/Downloads/KakaoTalk_Merged.apk"
 EDITOR_JAR="$BASE_DIR/APKEditor-1.4.5.jar"
 
-# GitHub Setup for Keystore
+# GitHub Setup for Keystore & Patches
+GITHUB_REPO="anycall6779/K-K-0_rev-nced_p-tch"
+GITHUB_API_URL="https://api.github.com/repos/$GITHUB_REPO/releases"
 KEYSTORE_URL="https://github.com/anycall6779/K-K-0_rev-nced_p-tch/raw/refs/heads/main/my_kakao_key.keystore"
 KEYSTORE_FILE="$PATCH_SCRIPT_DIR/my_kakao_key.keystore"
 MORPHE_CLI_JAR="$PATCH_SCRIPT_DIR/morphe-cli.jar"
+MPP_FILE="$BASE_DIR/patches-fixed.mpp"
 
 # --- Dependency Check ---
 check_dependencies() {
@@ -112,49 +115,96 @@ get_apkm_file() {
     return 0
 }
 
-# --- Get MPP File Path ---
-get_mpp_file() {
+# --- Fetch MPP from GitHub Releases ---
+fetch_mpp_from_github() {
     echo ""
     echo -e "${YELLOW}==================================${NC}"
-    echo -e "${GREEN}Morphe (.mpp) 패치 파일 선택${NC}"
+    echo -e "${GREEN}MPP 파일 선택 (GitHub Releases)${NC}"
     echo -e "${YELLOW}==================================${NC}"
     echo ""
     
-    local MPP_FILES=()
-    while IFS= read -r -d '' file; do
-        MPP_FILES+=("$(basename "$file")")
-    done < <(find "$BASE_DIR" -maxdepth 1 -name "*.mpp" -print0 2>/dev/null)
+    echo -e "${BLUE}[INFO] GitHub 릴리스 정보 가져오는 중...${NC}"
     
-    if [ ${#MPP_FILES[@]} -gt 0 ]; then
-        echo -e "${BLUE}다운로드 폴더에서 발견된 MPP 파일:${NC}"
-        for i in "${!MPP_FILES[@]}"; do
-            echo -e "  ${GREEN}$((i+1)).${NC} ${MPP_FILES[$i]}"
-        done
-        echo ""
-        echo -e "${YELLOW}번호를 입력하거나, 직접 경로를 입력하세요:${NC}"
-        read -r -p "> " selection
-        
-        if [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -ge 1 ] && [ "$selection" -le ${#MPP_FILES[@]} ]; then
-            MPP_FILE="$BASE_DIR/${MPP_FILES[$((selection-1))]}"
-            echo -e "${GREEN}[선택됨] ${MPP_FILES[$((selection-1))]}${NC}"
-            return 0
-        fi
-        
-        if [ -n "$selection" ]; then
-            MPP_FILE="$selection"
-        fi
-    else
-        echo -e "${BLUE}MPP 파일의 전체 경로를 입력하세요:${NC}"
-        echo -e "${YELLOW}(예: /storage/emulated/0/Download/patches.mpp)${NC}"
-        echo ""
-        read -r -p "> " MPP_FILE
-    fi
+    # 최근 10개 릴리스 가져오기
+    local RELEASES_JSON=$(curl -s "$GITHUB_API_URL?per_page=10" 2>/dev/null)
     
-    if [ -z "$MPP_FILE" ] || [ ! -f "$MPP_FILE" ]; then
-        echo -e "${RED}[ERROR] 유효하지 않은 파일 경로입니다. MPP 파일을 Download 폴더에 넣어주세요.${NC}"
+    if [ -z "$RELEASES_JSON" ] || echo "$RELEASES_JSON" | grep -q '"message"'; then
+        echo -e "${RED}[ERROR] GitHub API 요청 실패. 인터넷 연결을 확인하세요.${NC}"
         return 1
     fi
     
+    # 릴리스 정보 파싱 (tag_name과 .mpp 파일 URL)
+    local RELEASE_TAGS=()
+    local MPP_URLS=()
+    local MPP_NAMES=()
+    
+    # jq가 있으면 사용, 없으면 grep/sed로 파싱
+    if command -v jq &> /dev/null; then
+        while IFS= read -r line; do
+            RELEASE_TAGS+=("$line")
+        done < <(echo "$RELEASES_JSON" | jq -r '.[].tag_name')
+        
+        while IFS= read -r line; do
+            MPP_URLS+=("$line")
+        done < <(echo "$RELEASES_JSON" | jq -r '.[] | .assets[] | select(.name | endswith(".mpp") and (contains("sources") | not) and (contains("javadoc") | not)) | .browser_download_url' | head -10)
+        
+        while IFS= read -r line; do
+            MPP_NAMES+=("$line")
+        done < <(echo "$RELEASES_JSON" | jq -r '.[] | .assets[] | select(.name | endswith(".mpp") and (contains("sources") | not) and (contains("javadoc") | not)) | .name' | head -10)
+    else
+        # jq 없을 때 기본 파싱 (간단한 grep 사용)
+        while IFS= read -r line; do
+            RELEASE_TAGS+=("$line")
+        done < <(echo "$RELEASES_JSON" | grep -oP '"tag_name"\s*:\s*"\K[^"]+' | head -10)
+        
+        while IFS= read -r line; do
+            # .mpp로 끝나고 sources/javadoc이 아닌 URL만 필터링
+            if [[ "$line" == *.mpp ]] && [[ "$line" != *sources* ]] && [[ "$line" != *javadoc* ]]; then
+                MPP_URLS+=("$line")
+                MPP_NAMES+=("$(basename "$line")")
+            fi
+        done < <(echo "$RELEASES_JSON" | grep -oP '"browser_download_url"\s*:\s*"\K[^"]+\.mpp')
+    fi
+    
+    if [ ${#MPP_URLS[@]} -eq 0 ]; then
+        echo -e "${RED}[ERROR] 사용 가능한 MPP 파일을 찾을 수 없습니다.${NC}"
+        return 1
+    fi
+    
+    echo ""
+    echo -e "${GREEN}사용 가능한 MPP 버전:${NC}"
+    echo -e "  ${BLUE}0.${NC} 최신 버전 자동 선택 (${MPP_NAMES[0]:-첫번째})"
+    for i in "${!MPP_URLS[@]}"; do
+        echo -e "  ${GREEN}$((i+1)).${NC} ${MPP_NAMES[$i]}"
+    done
+    echo ""
+    echo -e "${YELLOW}번호를 입력하세요 (기본: 0 - 최신 버전):${NC}"
+    read -r -p "> " selection
+    
+    # 기본값 또는 0 선택 시 최신 버전
+    if [ -z "$selection" ] || [ "$selection" = "0" ]; then
+        selection=1
+    fi
+    
+    if [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -ge 1 ] && [ "$selection" -le ${#MPP_URLS[@]} ]; then
+        SELECTED_MPP_URL="${MPP_URLS[$((selection-1))]}"
+        SELECTED_MPP_NAME="${MPP_NAMES[$((selection-1))]}"
+        echo -e "${GREEN}[선택됨] ${SELECTED_MPP_NAME}${NC}"
+    else
+        echo -e "${RED}[ERROR] 잘못된 선택입니다. 최신 버전을 사용합니다.${NC}"
+        SELECTED_MPP_URL="${MPP_URLS[0]}"
+        SELECTED_MPP_NAME="${MPP_NAMES[0]}"
+    fi
+    
+    # MPP 다운로드
+    echo -e "${YELLOW}[INFO] MPP 다운로드 중: ${SELECTED_MPP_NAME}...${NC}"
+    rm -f "$MPP_FILE"
+    curl -L -o "$MPP_FILE" "$SELECTED_MPP_URL" || {
+        echo -e "${RED}[ERROR] MPP 다운로드 실패!${NC}"
+        return 1
+    }
+    
+    echo -e "${GREEN}[✓] MPP 다운로드 완료: $MPP_FILE${NC}"
     return 0
 }
 
@@ -251,7 +301,7 @@ main() {
     
     check_dependencies || exit 1
     get_apkm_file || exit 0
-    get_mpp_file || exit 0
+    fetch_mpp_from_github || exit 1
     merge_apkm || exit 1
     run_patch || exit 1
     
