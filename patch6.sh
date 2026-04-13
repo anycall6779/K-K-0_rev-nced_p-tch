@@ -277,17 +277,16 @@ run_patch() {
     
     # 파이썬 코드를 핫픽스하여 최신 Morphe 엔진과 호환되게 만듭니다 (자동 다운로드 우회)
     cat << 'EOF' > fix_build.py
-import os, re
+import os
 with open('build.py', 'r', encoding='utf-8') as f: code = f.read()
-code = code.replace("tag_cli, assets_cli = get_latest_release(CLI_RELEASE_URL)", "raise ConnectionError()")
-code = code.replace("url_cli, name_cli = pick_cli_jar_download_url(assets_cli)", "pass")
-code = code.replace("dest_cli = os.path.join(args.output, name_cli)", "dest_cli = os.environ.get('MORPHE_CLI_JAR'); url_cli = ''")
+code = code.replace("tag_cli, assets_cli = get_latest_release(CLI_RELEASE_URL)", "tag_cli = 'dummy'; assets_cli = []")
+code = code.replace("url_cli, name_cli = pick_cli_jar_download_url(assets_cli)", "url_cli = 'http://dummy'; name_cli = 'dummy'")
+code = code.replace("dest_cli = os.path.join(args.output, name_cli)", "dest_cli = os.environ.get('MORPHE_CLI_JAR')")
 code = code.replace("download_file(url_cli, dest_cli)", "pass")
-code = code.replace("tag_patches, assets_patches = get_latest_release(PATCHES_RELEASE_URL)", "raise ConnectionError()")
-code = code.replace("url_rvp, name_rvp = pick_patches_rvp_download_url(assets_patches)", "pass")
-code = code.replace("dest_rvp = os.path.join(args.output, name_rvp)", "dest_rvp = os.environ.get('MPP_FILE'); url_rvp = ''")
+code = code.replace("tag_patches, assets_patches = get_latest_release(PATCHES_RELEASE_URL)", "tag_patches = 'dummy'; assets_patches = []")
+code = code.replace("url_rvp, name_rvp = pick_patches_rvp_download_url(assets_patches)", "url_rvp = 'http://dummy'; name_rvp = 'dummy'")
+code = code.replace("dest_rvp = os.path.join(args.output, name_rvp)", "dest_rvp = os.environ.get('MPP_FILE')")
 code = code.replace("download_file(url_rvp, dest_rvp)", "pass")
-code = re.sub(r'except ConnectionError as e:\s*print.*?sys\.exit\(2\)', 'except ConnectionError:\n        pass', code, flags=re.DOTALL)
 code = code.replace("cmd.append(rvp_path)", "cmd.extend(['--patches', rvp_path])")
 with open('build.py', 'w', encoding='utf-8') as f: f.write(code)
 EOF
