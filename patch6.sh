@@ -175,7 +175,7 @@ merge_apkm() {
         echo -e "${RED}[ERROR] base.apk 없음${NC}"
         rm -rf "$TEMP_DIR"
         return 1
-    }
+    fi
     
     echo -e "${BLUE}[INFO] APKEditor로 병합 중... (잠시만 기다려주세요)${NC}"
     rm -f "$MERGED_APK_PATH"
