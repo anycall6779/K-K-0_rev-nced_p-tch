@@ -168,7 +168,6 @@ detect_keystore_type() {
         fi
     fi
     
-    echo "UNKNOWN"
     return 1
 }
 
@@ -179,7 +178,17 @@ prepare_keystore() {
     echo -e "${GREEN}    키스토어 준비 중...${NC}"
     echo -e "${GREEN}========================================${NC}"
 
-    # 1) 로컬 키스토어 확인 (workspace 또는 WORK_DIR)
+    # 0) Bouncy Castle 미리 다운로드 (모든 형식 감지에 필요할 수 있음)
+    if [ ! -f "$BCPROV_JAR" ] || [ ! -s "$BCPROV_JAR" ]; then
+        echo -e "${YELLOW}[INFO] Bouncy Castle 사전 다운로드 중...${NC}"
+        rm -f "$BCPROV_JAR"
+        if ! curl -L --max-time 60 --retry 3 --retry-delay 2 \
+            -o "$BCPROV_JAR" "$BCPROV_URL" 2>/dev/null; then
+            echo -e "${YELLOW}[WARN] Bouncy Castle 다운로드 실패 (BKS 형식 감지 불가)${NC}"
+        fi
+    fi
+
+    # 1) 로컬 키스토어 확인 및 형식 감지
     local FOUND_LOCAL=0
     local LOCAL_KEYSTORE_PATHS=(
         "$WORK_DIR/my_kakao_key.keystore"
@@ -192,38 +201,34 @@ prepare_keystore() {
             local FILE_SIZE=$(wc -c < "$path")
             echo -e "${BLUE}[INFO] 로컬 파일 발견: $path (${FILE_SIZE} bytes)${NC}"
             
-            # Bouncy Castle이 필요할 수 있으므로 먼저 다운로드
-            if [ ! -f "$BCPROV_JAR" ] || [ ! -s "$BCPROV_JAR" ]; then
-                echo -e "${YELLOW}[INFO] Bouncy Castle 다운로드 중...${NC}"
-                curl -L --max-time 60 --retry 3 --retry-delay 2 \
-                    -o "$BCPROV_JAR" "$BCPROV_URL" 2>/dev/null || true
-            fi
+            # 형식 감지 시도
+            local DETECTED_TYPE=$( detect_keystore_type "$path" "$KEYSTORE_PASS" "$BCPROV_JAR" 2>/dev/null )
             
-            # 형식 감지
-            local DETECTED_TYPE=$(detect_keystore_type "$path" "$KEYSTORE_PASS" "$BCPROV_JAR" 2>/dev/null || echo "UNKNOWN")
-            
-            if [ "$DETECTED_TYPE" != "UNKNOWN" ]; then
-                echo -e "${GREEN}[OK] 키스토어 형식 감지됨: $DETECTED_TYPE${NC}"
+            if [ -n "$DETECTED_TYPE" ] && [ "$DETECTED_TYPE" != "UNKNOWN" ]; then
+                echo -e "${GREEN}[OK] 키스토어 형식: $DETECTED_TYPE${NC}"
                 KEYSTORE_BKS="$path"
                 KEYSTORE_TYPE="$DETECTED_TYPE"
                 FOUND_LOCAL=1
                 break
             else
-                echo -e "${YELLOW}[WARN] $path: 형식을 읽을 수 없음 (손상 가능성)${NC}"
+                echo -e "${YELLOW}[WARN] 로컬 파일 형식 감지 실패 (손상 가능성)${NC}"
             fi
         fi
     done
     
     # 2) 로컬 파일이 유효하지 않으면 GitHub에서 다운로드
     if [ $FOUND_LOCAL -eq 0 ]; then
-        echo -e "${YELLOW}[INFO] GitHub에서 키스토어 다운로드 중...${NC}"
+        echo -e "${YELLOW}[INFO] GitHub에서 신규 키스토어 다운로드 중...${NC}"
         mkdir -p "$WORK_DIR"
         
-        curl -L --max-time 30 --retry 3 --retry-delay 2 \
-            -o "$WORK_DIR/my_kakao_key_temp.keystore" "$KEYSTORE_URL" || {
+        rm -f "$WORK_DIR/my_kakao_key_temp.keystore"
+        
+        if ! curl -L --max-time 30 --retry 3 --retry-delay 2 \
+            -o "$WORK_DIR/my_kakao_key_temp.keystore" "$KEYSTORE_URL"; then
             echo -e "${RED}[ERROR] 키스토어 다운로드 실패!${NC}"
+            echo -e "${YELLOW}[INFO] URL 확인: $KEYSTORE_URL${NC}"
             return 1
-        }
+        fi
 
         if [ ! -s "$WORK_DIR/my_kakao_key_temp.keystore" ]; then
             echo -e "${RED}[ERROR] 다운로드된 키스토어가 비어 있습니다.${NC}"
@@ -242,30 +247,43 @@ prepare_keystore() {
         fi
         
         KEYSTORE_BKS="$WORK_DIR/my_kakao_key_temp.keystore"
+        
+        # 다운로드된 파일의 형식 감지
+        local DETECTED_TYPE=$(detect_keystore_type "$KEYSTORE_BKS" "$KEYSTORE_PASS" "$BCPROV_JAR" 2>/dev/null)
+        
+        if [ -n "$DETECTED_TYPE" ] && [ "$DETECTED_TYPE" != "UNKNOWN" ]; then
+            echo -e "${GREEN}[OK] 다운로드된 키스토어 형식: $DETECTED_TYPE${NC}"
+            KEYSTORE_TYPE="$DETECTED_TYPE"
+        else
+            echo -e "${RED}[ERROR] 다운로드된 키스토어 형식을 읽을 수 없습니다!${NC}"
+            echo -e "${YELLOW}[DEBUG] keytool 직접 테스트:${NC}"
+            keytool -list -keystore "$KEYSTORE_BKS" -storepass "$KEYSTORE_PASS" -storetype PKCS12 2>&1 | head -5 || true
+            keytool -list -keystore "$KEYSTORE_BKS" -storepass "$KEYSTORE_PASS" -storetype JKS 2>&1 | head -5 || true
+            rm -f "$KEYSTORE_BKS"
+            return 1
+        fi
     fi
 
-    # 3) Bouncy Castle provider 다운로드 (BKS 읽기에만 필요)
+    # 3) BKS 형식이면 Bouncy Castle 재확인
     if [ "$KEYSTORE_TYPE" = "BKS" ]; then
         if [ ! -f "$BCPROV_JAR" ] || [ ! -s "$BCPROV_JAR" ]; then
-            echo -e "${YELLOW}[INFO] Bouncy Castle provider 다운로드 중...${NC}"
+            echo -e "${YELLOW}[INFO] BKS 형식: Bouncy Castle 설치 중...${NC}"
             rm -f "$BCPROV_JAR"
-            curl -L --max-time 60 --retry 3 --retry-delay 2 \
-                -o "$BCPROV_JAR" "$BCPROV_URL" 2>/dev/null || {
+            if ! curl -L --max-time 60 --retry 3 --retry-delay 2 \
+                -o "$BCPROV_JAR" "$BCPROV_URL" 2>/dev/null; then
                 echo -e "${RED}[ERROR] Bouncy Castle 다운로드 실패${NC}"
-                echo -e "${YELLOW}[INFO] Maven 저장소 URL 확인: $BCPROV_URL${NC}"
                 return 1
-            }
+            fi
         fi
 
         if [ ! -s "$BCPROV_JAR" ]; then
             echo -e "${RED}[ERROR] Bouncy Castle JAR가 비어 있습니다.${NC}"
-            rm -f "$BCPROV_JAR"
             return 1
         fi
-        echo -e "${GREEN}[OK] Bouncy Castle 준비됨${NC}"
+        echo -e "${GREEN}[OK] Bouncy Castle 준비 완료${NC}"
     fi
 
-    # 4) 최종 keystore 형식 재확인
+    # 4) 최종 검증
     echo -e "${BLUE}[INFO] 최종 키스토어 검증 중 ($KEYSTORE_TYPE)...${NC}"
     
     if [ "$KEYSTORE_TYPE" = "BKS" ]; then
@@ -275,19 +293,7 @@ prepare_keystore() {
             -keystore "$KEYSTORE_BKS" \
             -storetype BKS \
             -storepass "$KEYSTORE_PASS" >/dev/null 2>&1; then
-            echo -e "${RED}[ERROR] BKS 키스토어 검증 재실패${NC}"
-            echo -e "${YELLOW}[DEBUG] 상세 오류:${NC}"
-            keytool -list \
-                -providerclass org.bouncycastle.jce.provider.BouncyCastleProvider \
-                -providerpath "$BCPROV_JAR" \
-                -keystore "$KEYSTORE_BKS" \
-                -storetype BKS \
-                -storepass "$KEYSTORE_PASS" 2>&1 || true
-            
-            echo ""
-            echo -e "${YELLOW}[공략] BKS 파일 재시도:${NC}"
-            echo -e "  rm \"$KEYSTORE_BKS\""
-            echo -e "  curl -L -o \"$KEYSTORE_BKS\" \"$KEYSTORE_URL\""
+            echo -e "${RED}[ERROR] BKS 검증 실패!${NC}"
             return 1
         fi
         echo -e "${GREEN}[OK] BKS 검증 성공${NC}"
@@ -296,7 +302,7 @@ prepare_keystore() {
             -keystore "$KEYSTORE_BKS" \
             -storepass "$KEYSTORE_PASS" \
             -storetype "$KEYSTORE_TYPE" >/dev/null 2>&1; then
-            echo -e "${RED}[ERROR] $KEYSTORE_TYPE 키스토어 검증 실패${NC}"
+            echo -e "${RED}[ERROR] $KEYSTORE_TYPE 검증 실패!${NC}"
             return 1
         fi
         echo -e "${GREEN}[OK] $KEYSTORE_TYPE 검증 성공${NC}"
@@ -304,6 +310,8 @@ prepare_keystore() {
         echo -e "${RED}[ERROR] 알 수 없는 키스토어 형식: $KEYSTORE_TYPE${NC}"
         return 1
     fi
+
+    return 0
 }
 
 # --- APK 서명 ---
