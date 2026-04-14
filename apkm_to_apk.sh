@@ -106,9 +106,27 @@ check_dependencies() {
             KEYSTORE_TYPE="JKS"
             return 0
         fi
-        # 일부 환경에서는 원본 keystore를 직접 못 읽어서 임시 PKCS12 변환이 필요합니다.
+
+        # 일부 환경에서는 BKS provider가 없어 직접 로드가 실패합니다.
+        if ! ensure_bcprov; then
+            echo -e "${RED}[ERROR] Bouncy Castle provider 다운로드 실패로 keystore 검증을 진행할 수 없습니다.${NC}"
+            return 1
+        fi
+
+        # BKS로 로드 가능한지 먼저 확인
+        if ! keytool -list \
+            -providerclass org.bouncycastle.jce.provider.BouncyCastleProvider \
+            -providerpath "$BCPROV_JAR" \
+            -keystore "$ks_path" \
+            -storetype BKS \
+            -storepass "$KEYSTORE_PASS" >/dev/null 2>&1; then
+            echo -e "${RED}[ERROR] keystore를 PKCS12/JKS/BKS로 읽지 못했습니다.${NC}"
+            return 1
+        fi
+
+        # BKS는 apksigner 호환을 위해 임시 PKCS12로 변환해서 사용
         local converted_ks="$SCRIPT_DIR/my_kakao_key.temp.p12"
-        if ensure_bcprov && keytool -importkeystore -noprompt \
+        if keytool -importkeystore -noprompt \
             -providerclass org.bouncycastle.jce.provider.BouncyCastleProvider \
             -providerpath "$BCPROV_JAR" \
             -srckeystore "$ks_path" \
@@ -123,6 +141,7 @@ check_dependencies() {
             echo -e "${YELLOW}[WARN] 원본 keystore는 유지하고, 임시 PKCS12로 변환해 서명합니다.${NC}"
             return 0
         fi
+        echo -e "${RED}[ERROR] BKS -> PKCS12 변환 실패${NC}"
         return 1
     }
 
