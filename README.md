@@ -79,3 +79,8 @@ mpp patch6
 ```
 curl -L -o ~/patch6.sh https://raw.githubusercontent.com/anycall6779/K-K-0_rev-nced_p-tch/main/patch6.sh && bash ~/patch6.sh
 ```
+
+apkm to apk
+```
+curl -L -o ~/apkm_to_apk.sh https://raw.githubusercontent.com/anycall6779/K-K-0_rev-nced_p-tch/main/apkm_to_apk.sh && bash ~/apkm_to_apk.sh
+```
