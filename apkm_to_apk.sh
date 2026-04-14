@@ -23,6 +23,8 @@ KEYSTORE_FILE="$SCRIPT_DIR/my_kakao_key.keystore"
 KEYSTORE_ALIAS=""
 KEYSTORE_PASS="android"
 KEYSTORE_TYPE=""  # PKCS12 또는 JKS 감지
+BCPROV_JAR="$SCRIPT_DIR/bcprov-jdk18on-1.78.1.jar"
+BCPROV_URL="https://repo1.maven.org/maven2/org/bouncycastle/bcprov-jdk18on/1.78.1/bcprov-jdk18on-1.78.1.jar"
 
 extract_apk_sha256() {
     local apk_path="$1"
@@ -81,7 +83,17 @@ check_dependencies() {
         curl -L -o "$EDITOR_JAR" "https://github.com/REAndroid/APKEditor/releases/download/V1.4.5/APKEditor-1.4.5.jar" || exit 1
     fi
 
-    # patch5.sh와 동일하게 keytool로 타입을 PKCS12/JKS로만 감지합니다.
+    ensure_bcprov() {
+        if [ -f "$BCPROV_JAR" ] && [ -s "$BCPROV_JAR" ]; then
+            return 0
+        fi
+        echo -e "${YELLOW}[INFO] Bouncy Castle provider 다운로드 중...${NC}"
+        curl -L -f --connect-timeout 15 --max-time 60 -o "$BCPROV_JAR" "$BCPROV_URL" >/dev/null 2>&1 || return 1
+        [ -s "$BCPROV_JAR" ] || return 1
+        return 0
+    }
+
+    # patch5.sh keystore를 원본 그대로 내려받고, 필요할 때만 임시 PKCS12로 변환합니다.
     verify_keystore() {
         local ks_path="$1"
         [ ! -f "$ks_path" ] && return 1
@@ -92,6 +104,23 @@ check_dependencies() {
         fi
         if keytool -list -keystore "$ks_path" -storepass "$KEYSTORE_PASS" -storetype JKS >/dev/null 2>&1; then
             KEYSTORE_TYPE="JKS"
+            return 0
+        fi
+        # 일부 환경에서는 원본 keystore를 직접 못 읽어서 임시 PKCS12 변환이 필요합니다.
+        local converted_ks="$SCRIPT_DIR/my_kakao_key.temp.p12"
+        if ensure_bcprov && keytool -importkeystore -noprompt \
+            -providerclass org.bouncycastle.jce.provider.BouncyCastleProvider \
+            -providerpath "$BCPROV_JAR" \
+            -srckeystore "$ks_path" \
+            -srcstoretype BKS \
+            -srcstorepass "$KEYSTORE_PASS" \
+            -destkeystore "$converted_ks" \
+            -deststoretype PKCS12 \
+            -deststorepass "$KEYSTORE_PASS" \
+            -destkeypass "$KEYSTORE_PASS" >/dev/null 2>&1; then
+            KEYSTORE_FILE="$converted_ks"
+            KEYSTORE_TYPE="PKCS12"
+            echo -e "${YELLOW}[WARN] 원본 keystore는 유지하고, 임시 PKCS12로 변환해 서명합니다.${NC}"
             return 0
         fi
         return 1
@@ -239,7 +268,7 @@ merge_and_sign() {
     fi
 
     echo -e "${YELLOW}임시 파일 정리 중...${NC}"
-    rm -rf "$TEMP_DIR" "$MERGED_APK" "$ALIGNED_APK"
+    rm -rf "$TEMP_DIR" "$MERGED_APK" "$ALIGNED_APK" "$SCRIPT_DIR/my_kakao_key.temp.p12"
 }
 
 main() {
