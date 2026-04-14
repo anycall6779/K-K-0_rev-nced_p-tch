@@ -18,7 +18,7 @@ SCRIPT_DIR="$HOME/apkm_to_apk"
 EDITOR_JAR="$BASE_DIR/APKEditor-1.4.5.jar"
 
 # Keystore 설정 (patch5.sh 방식 그대로)
-KEYSTORE_URL="https://github.com/anycall6779/K-K-0_rev-nced_p-tch/raw/refs/heads/main/my_kakao_key.keystore"
+KEYSTORE_URL="https://raw.githubusercontent.com/anycall6779/K-K-0_rev-nced_p-tch/main/my_kakao_key.keystore"
 KEYSTORE_FILE="$SCRIPT_DIR/my_kakao_key.keystore"
 KEYSTORE_ALIAS=""
 KEYSTORE_PASS="android"
@@ -149,10 +149,19 @@ check_dependencies() {
     download_keystore() {
         echo -e "${YELLOW}[INFO] 고정 키스토어(my_kakao_key.keystore) 다운로드 중...${NC}"
         rm -f "$KEYSTORE_FILE"
-        curl -L -f -o "$KEYSTORE_FILE" "$KEYSTORE_URL" >/dev/null 2>&1 || {
+        curl -L -f -A "Mozilla/5.0 (Android; Termux)" -o "$KEYSTORE_FILE" "$KEYSTORE_URL" >/dev/null 2>&1 || {
             echo -e "${RED}[ERROR] 키스토어 다운로드 실패! 인터넷 연결이나 URL을 확인하세요.${NC}"
             exit 1
         }
+
+        if [ ! -s "$KEYSTORE_FILE" ]; then
+            echo -e "${RED}[ERROR] 키스토어 파일이 비어 있습니다.${NC}"
+            exit 1
+        fi
+        if head -c 256 "$KEYSTORE_FILE" 2>/dev/null | grep -qiE "<!doctype html|<html|github"; then
+            echo -e "${RED}[ERROR] 키스토어 대신 HTML 페이지가 다운로드되었습니다. 네트워크/URL 상태를 확인하세요.${NC}"
+            exit 1
+        fi
 
         if verify_keystore "$KEYSTORE_FILE"; then
             echo -e "${GREEN}[OK] 키스토어 타입: ${KEYSTORE_TYPE}${NC}"
