@@ -1,8 +1,7 @@
 #!/bin/bash
 #
-# KakaoTalk APKM → 서명된 APK (패치 없음)
-# patch5.sh와 동일한 방식으로 키스토어를 사용하여 서명
-# 로컬 keystore 또는 GitHub에서 자동 다운로드
+# KakaoTalk APKM → 서명된 APK (패치 없음) v2.0
+# 최대한 단순화 - patch5.sh와 정확히 동일한 로직
 #
 set -e
 
@@ -19,11 +18,10 @@ WORK_DIR="$HOME/Downloads"
 MERGED_APK_PATH="$WORK_DIR/KakaoTalk_Merged.apk"
 EDITOR_JAR="$BASE_DIR/APKEditor-1.4.5.jar"
 
-# 키스토어 (patch5.sh 동일 URL)
+# 키스토어 (patch5.sh와 100% 동일)
 KEYSTORE_URL="https://github.com/anycall6779/K-K-0_rev-nced_p-tch/raw/refs/heads/main/my_kakao_key.keystore"
-KEYSTORE_BKS="$WORK_DIR/my_kakao_key.keystore"
+KEYSTORE_FILE="my_kakao_key.keystore"
 KEYSTORE_PASS="android"
-KEYSTORE_TYPE=""  # 자동 감지됨: PKCS12 또는 JKS
 
 # --- 의존성 확인 ---
 check_dependencies() {
@@ -135,61 +133,53 @@ merge_apkm() {
     return 0
 }
 
-# --- 키스토어 준비 (patch5.sh와 동일한 방식) ---
+# --- 키스토어 준비 (patch5.sh와 정확히 동일) ---
 prepare_keystore() {
     echo ""
     echo -e "${GREEN}========================================${NC}"
     echo -e "${GREEN}    키스토어 준비 중...${NC}"
     echo -e "${GREEN}========================================${NC}"
 
-    mkdir -p "$WORK_DIR"
-    
-    # 항상 GitHub에서 다운로드 (로컬 손상 파일 무시)
+    # GitHub에서 키스토어 다운로드 (고정)
     echo -e "${YELLOW}[INFO] GitHub에서 키스토어 다운로드 중...${NC}"
     
-    # 기존 파일 삭제
-    rm -f "$KEYSTORE_BKS"
+    cd "$WORK_DIR"
     
-    # patch5.sh와 동일한 curl 옵션 사용
-    if ! curl -L -o "$KEYSTORE_BKS" "$KEYSTORE_URL"; then
+    curl -L -o "$KEYSTORE_FILE" "$KEYSTORE_URL" || {
         echo -e "${RED}[ERROR] 키스토어 다운로드 실패!${NC}"
         return 1
-    fi
+    }
 
-    if [ ! -s "$KEYSTORE_BKS" ]; then
-        echo -e "${RED}[ERROR] 다운로드된 키스토어가 비어 있습니다.${NC}"
-        rm -f "$KEYSTORE_BKS"
+    if [ ! -s "$KEYSTORE_FILE" ]; then
+        echo -e "${RED}[ERROR] 키스토어 파일이 비어 있습니다.${NC}"
         return 1
     fi
 
-    local FILE_SIZE=$(wc -c < "$KEYSTORE_BKS")
+    local FILE_SIZE=$(wc -c < "$KEYSTORE_FILE")
     echo -e "${BLUE}[INFO] 다운로드 완료 (${FILE_SIZE} bytes)${NC}"
 
-    # 키스토어 형식 감지 및 검증 (patch5.sh와 동일)
+    # 키스토어 형식 감지
     echo -e "${BLUE}[INFO] 키스토어 형식 감지 중...${NC}"
     
-    if keytool -list -keystore "$KEYSTORE_BKS" -storepass "$KEYSTORE_PASS" -storetype PKCS12 >/dev/null 2>&1; then
+    if keytool -list -keystore "$KEYSTORE_FILE" -storepass "$KEYSTORE_PASS" -storetype PKCS12 >/dev/null 2>&1; then
         KEYSTORE_TYPE="PKCS12"
         echo -e "${GREEN}[OK] 형식: PKCS12${NC}"
-    elif keytool -list -keystore "$KEYSTORE_BKS" -storepass "$KEYSTORE_PASS" -storetype JKS >/dev/null 2>&1; then
+    elif keytool -list -keystore "$KEYSTORE_FILE" -storepass "$KEYSTORE_PASS" -storetype JKS >/dev/null 2>&1; then
         KEYSTORE_TYPE="JKS"
         echo -e "${GREEN}[OK] 형식: JKS${NC}"
     else
         echo -e "${RED}[ERROR] 키스토어 형식을 읽을 수 없습니다!${NC}"
-        echo -e "${YELLOW}[DEBUG] keytool 상세 정보:${NC}"
-        keytool -list -keystore "$KEYSTORE_BKS" -storepass "$KEYSTORE_PASS" -storetype PKCS12 2>&1 || true
-        echo ""
-        echo -e "${YELLOW}[솔루션]${NC}"
-        echo -e "  GitHub URL에서 새 keystore 다운로드 시도..."
-        echo -e "  curl -L -o /tmp/ks_test.keystore \"$KEYSTORE_URL\""
+        echo -e "${YELLOW}[DEBUG] keytool 테스트 결과:${NC}"
+        keytool -list -keystore "$KEYSTORE_FILE" -storepass "$KEYSTORE_PASS" -storetype PKCS12 2>&1 | head -3 || true
+        keytool -list -keystore "$KEYSTORE_FILE" -storepass "$KEYSTORE_PASS" -storetype JKS 2>&1 | head -3 || true
         return 1
     fi
 
-    echo -e "${GREEN}[OK] 키스토어 준비 완료 ($KEYSTORE_TYPE)${NC}"
+    echo -e "${GREEN}[OK] 키스토어 준비 완료${NC}"
     return 0
 }
 
-# --- APK 서명 (patch5.sh와 동일한 방식) ---
+# --- APK 서명 ---
 sign_apk() {
     echo ""
     echo -e "${GREEN}========================================${NC}"
@@ -199,19 +189,19 @@ sign_apk() {
     local SIGNED_APK="$BASE_DIR/KakaoTalk_Signed.apk"
     rm -f "$SIGNED_APK"
 
-    echo -e "${BLUE}[INFO] apksigner로 서명 중...${NC}"
+    echo -e "${BLUE}[INFO] apksigner 서명 실행...${NC}"
     
-    # patch5.sh와 동일한 방식으로 직접 서명
-    if ! apksigner sign \
-        --ks "$KEYSTORE_BKS" \
+    cd "$WORK_DIR"
+    apksigner sign \
+        --ks "$KEYSTORE_FILE" \
         --ks-pass "pass:$KEYSTORE_PASS" \
         --key-pass "pass:$KEYSTORE_PASS" \
         --ks-type "$KEYSTORE_TYPE" \
         --out "$SIGNED_APK" \
-        "$MERGED_APK_PATH"; then
+        "$MERGED_APK_PATH" || {
         echo -e "${RED}[ERROR] apksigner 서명 실패${NC}"
         return 1
-    fi
+    }
 
     if [ ! -f "$SIGNED_APK" ]; then
         echo -e "${RED}[ERROR] 서명된 APK 생성 실패${NC}"
@@ -219,7 +209,6 @@ sign_apk() {
     fi
 
     echo -e "${BLUE}[INFO] 서명 검증 중...${NC}"
-    # 서명 검증
     if apksigner verify "$SIGNED_APK" >/dev/null 2>&1; then
         echo -e "${GREEN}[OK] 서명 검증 통과${NC}"
     else
@@ -233,7 +222,7 @@ sign_apk() {
     echo -e "${GREEN}[SUCCESS] 저장 완료: $SIGNED_APK${NC}"
 }
 
-# --- 임시 파일 정리 ---
+# --- 정리 ---
 cleanup() {
     echo -e "${BLUE}[INFO] 임시 파일 정리 중...${NC}"
     rm -f "$MERGED_APK_PATH"
@@ -245,7 +234,7 @@ main() {
     clear
     echo -e "${GREEN}======================================${NC}"
     echo -e "${GREEN}  APKM → 서명된 APK (패치 없음)${NC}"
-    echo -e "${GREEN}  (patch5.sh 동일 키스토어 사용)${NC}"
+    echo -e "${GREEN}  v2.0 - patch5.sh와 동일 로직${NC}"
     echo -e "${GREEN}======================================${NC}"
     echo ""
 
