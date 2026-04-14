@@ -75,13 +75,75 @@ check_dependencies() {
         curl -L -o "$EDITOR_JAR" "https://github.com/REAndroid/APKEditor/releases/download/V1.4.5/APKEditor-1.4.5.jar" || exit 1
     fi
 
-    # 키스토어는 항상 새로 다운로드 (깨진 파일 방지)
-    echo -e "${YELLOW}[INFO] 서명 키스토어 다운로드 중...${NC}"
-    rm -f "$KEYSTORE_FILE"
-    curl -L -o "$KEYSTORE_FILE" "$KEYSTORE_URL" || {
-        echo -e "${RED}[ERROR] 키스토어 다운로드 실패! 인터넷 연결이나 URL을 확인하세요.${NC}"
-        exit 1
+    # 키스토어 다운로드 또는 로컬 생성
+    download_or_create_keystore() {
+        # 키스토어 유효성 검증 함수 (keytool로 실제 파싱 가능한지 확인)
+        verify_keystore() {
+            local ks_path="$1"
+            [ ! -f "$ks_path" ] && return 1
+            # keytool -list로 키스토어를 실제 로드해본다
+            keytool -list \
+                -keystore "$ks_path" \
+                -storepass "$KEYSTORE_PASS" \
+                -storetype PKCS12 >/dev/null 2>&1
+            return $?
+        }
+
+        # 기존 파일이 있으면 먼저 유효성 검사
+        if [ -f "$KEYSTORE_FILE" ]; then
+            echo -e "${BLUE}[INFO] 기존 키스토어 유효성 검증 중...${NC}"
+            if verify_keystore "$KEYSTORE_FILE"; then
+                echo -e "${GREEN}[OK] 기존 키스토어가 유효합니다. 재사용합니다.${NC}"
+                return 0
+            else
+                echo -e "${YELLOW}[WARN] 기존 키스토어가 손상되었습니다. 삭제 후 재생성합니다.${NC}"
+                rm -f "$KEYSTORE_FILE"
+            fi
+        fi
+
+        # 1차: GitHub에서 다운로드 시도
+        echo -e "${YELLOW}[INFO] 서명 키스토어 다운로드 시도 중...${NC}"
+        curl -L -f -o "$KEYSTORE_FILE" "$KEYSTORE_URL" 2>/dev/null || true
+
+        # 다운로드된 파일 검증: 크기 + keytool 파싱
+        if [ -f "$KEYSTORE_FILE" ]; then
+            local FILESIZE=$(wc -c < "$KEYSTORE_FILE" 2>/dev/null || echo 0)
+            if [ "$FILESIZE" -lt 100 ]; then
+                echo -e "${YELLOW}[WARN] 다운로드된 키스토어가 너무 작습니다 (${FILESIZE}B). 삭제합니다.${NC}"
+                rm -f "$KEYSTORE_FILE"
+            elif ! verify_keystore "$KEYSTORE_FILE"; then
+                echo -e "${YELLOW}[WARN] 다운로드된 키스토어가 유효한 PKCS12 형식이 아닙니다. 삭제합니다.${NC}"
+                rm -f "$KEYSTORE_FILE"
+            else
+                echo -e "${GREEN}[OK] 키스토어 다운로드 및 검증 완료${NC}"
+                return 0
+            fi
+        fi
+
+        # 2차: 다운로드 실패/검증 실패 시 keytool로 로컬 생성
+        echo -e "${YELLOW}[INFO] 키스토어를 로컬에서 새로 생성합니다...${NC}"
+        rm -f "$KEYSTORE_FILE"
+        keytool -genkeypair \
+            -alias "$KEYSTORE_ALIAS" \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=ReVanced, OU=ReVanced, O=ReVanced, L=Somewhere, ST=Some, C=US" \
+            -keystore "$KEYSTORE_FILE" \
+            -storepass "$KEYSTORE_PASS" \
+            -keypass "$KEYSTORE_PASS" \
+            -storetype PKCS12 2>/dev/null || {
+            echo -e "${RED}[ERROR] 키스토어 생성 실패!${NC}"
+            exit 1
+        }
+
+        # 생성된 키스토어도 검증
+        if verify_keystore "$KEYSTORE_FILE"; then
+            echo -e "${GREEN}[OK] 키스토어 로컬 생성 및 검증 완료${NC}"
+        else
+            echo -e "${RED}[ERROR] 생성된 키스토어가 유효하지 않습니다!${NC}"
+            exit 1
+        fi
     }
+    download_or_create_keystore
 }
 
 get_apkm_file() {
@@ -158,8 +220,18 @@ merge_and_sign() {
     fi
 
     echo -e "${BLUE}[4/4] apksigner를 이용해 키스토어로 서명 중...${NC}"
+
+    # 키스토어 파일 유효성 최종 확인
+    if [ ! -f "$KEYSTORE_FILE" ]; then
+        echo -e "${RED}[ERROR] 키스토어 파일이 존재하지 않습니다: $KEYSTORE_FILE${NC}"
+        exit 1
+    fi
+    local KS_SIZE=$(wc -c < "$KEYSTORE_FILE" 2>/dev/null || echo 0)
+    echo -e "${BLUE}[DEBUG] 키스토어 크기: ${KS_SIZE}B${NC}"
+
     rm -f "$FINAL_APK"
-    apksigner sign --ks "$KEYSTORE_FILE" \
+    apksigner sign \
+        --ks "$KEYSTORE_FILE" \
         --ks-key-alias "$KEYSTORE_ALIAS" \
         --ks-pass "pass:$KEYSTORE_PASS" \
         --key-pass "pass:$KEYSTORE_PASS" \
