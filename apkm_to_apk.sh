@@ -1,7 +1,8 @@
 #!/bin/bash
 #
 # KakaoTalk APKM → 서명된 APK (패치 없음)
-# patch5.sh의 키스토어/서명 방식만 그대로 사용
+# patch5.sh의 키스토어를 그대로 사용하되,
+# BKS 형식을 PKCS12로 변환 후 apksigner로 서명
 #
 set -e
 
@@ -12,25 +13,30 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-# Configuration (patch5.sh 동일)
+# Configuration
 BASE_DIR="/storage/emulated/0/Download"
-MERGED_APK_PATH="$HOME/Downloads/KakaoTalk_Merged.apk"
+WORK_DIR="$HOME/Downloads"
+MERGED_APK_PATH="$WORK_DIR/KakaoTalk_Merged.apk"
 EDITOR_JAR="$BASE_DIR/APKEditor-1.4.5.jar"
 
-# GitHub 키스토어 URL (patch5.sh 동일 + 대체 URL)
-KEYSTORE_URL_PRIMARY="https://github.com/anycall6779/K-K-0_rev-nced_p-tch/raw/refs/heads/main/my_kakao_key.keystore"
-KEYSTORE_URL_FALLBACK="https://raw.githubusercontent.com/anycall6779/K-K-0_rev-nced_p-tch/main/my_kakao_key.keystore"
-KEYSTORE_FILE="my_kakao_key.keystore"
+# 키스토어 (patch5.sh 동일 URL)
+KEYSTORE_URL="https://github.com/anycall6779/K-K-0_rev-nced_p-tch/raw/refs/heads/main/my_kakao_key.keystore"
+KEYSTORE_BKS="$WORK_DIR/my_kakao_key.keystore"
+KEYSTORE_P12="$WORK_DIR/my_kakao_key.p12"
 KEYSTORE_PASS="android"
+
+# Bouncy Castle (BKS→PKCS12 변환에 필요)
+BCPROV_JAR="$WORK_DIR/bcprov-jdk18on-1.78.1.jar"
+BCPROV_URL="https://repo1.maven.org/maven2/org/bouncycastle/bcprov-jdk18on/1.78.1/bcprov-jdk18on-1.78.1.jar"
 
 # --- 의존성 확인 ---
 check_dependencies() {
     echo -e "${BLUE}[INFO] 필수 도구 확인 중...${NC}"
     local MISSING=0
 
-    for cmd in curl unzip java keytool; do
+    for cmd in curl unzip java keytool apksigner; do
         if ! command -v $cmd &> /dev/null; then
-            echo -e "${RED}[ERROR] '$cmd' 가 없습니다. 설치: pkg install $cmd${NC}"
+            echo -e "${RED}[ERROR] '$cmd' 없음. 설치: pkg install $cmd${NC}"
             MISSING=1
         fi
     done
@@ -45,11 +51,11 @@ check_dependencies() {
     fi
 
     [ $MISSING -eq 1 ] && exit 1
-    mkdir -p "$HOME/Downloads"
+    mkdir -p "$WORK_DIR"
     echo -e "${GREEN}[OK] 준비 완료${NC}"
 }
 
-# --- APKM 파일 선택 (patch5.sh 동일) ---
+# --- APKM 파일 선택 ---
 get_apkm_file() {
     echo ""
     echo -e "${YELLOW}==================================${NC}"
@@ -95,7 +101,7 @@ get_apkm_file() {
     return 0
 }
 
-# --- APKM 병합 (patch5.sh 동일) ---
+# --- APKM 병합 ---
 merge_apkm() {
     echo ""
     echo -e "${BLUE}[INFO] APKM 파일 병합 시작...${NC}"
@@ -133,104 +139,150 @@ merge_apkm() {
     return 0
 }
 
-# --- 키스토어 다운로드 및 검증 (patch5.sh 방식 + 디버깅) ---
-download_and_verify_keystore() {
-    echo -e "${YELLOW}[INFO] 고정 키스토어(my_kakao_key.keystore) 다운로드 중...${NC}"
+# --- 키스토어 준비 (BKS → PKCS12 변환) ---
+prepare_keystore() {
+    echo ""
+    echo -e "${GREEN}========================================${NC}"
+    echo -e "${GREEN}    키스토어 준비 중...${NC}"
+    echo -e "${GREEN}========================================${NC}"
 
-    # 1차: patch5.sh 동일 URL
-    rm -f "$KEYSTORE_FILE"
-    curl -L -o "$KEYSTORE_FILE" "$KEYSTORE_URL_PRIMARY" 2>/dev/null
+    # 1) BKS 키스토어 다운로드 (patch5.sh 동일 URL, 동일 curl 플래그)
+    echo -e "${YELLOW}[INFO] 고정 키스토어 다운로드 중...${NC}"
+    rm -f "$KEYSTORE_BKS"
+    curl -L -o "$KEYSTORE_BKS" "$KEYSTORE_URL" || {
+        echo -e "${RED}[ERROR] 키스토어 다운로드 실패!${NC}"
+        return 1
+    }
 
-    # 다운로드 실패 시 대체 URL 시도
-    if [ ! -f "$KEYSTORE_FILE" ] || [ ! -s "$KEYSTORE_FILE" ]; then
-        echo -e "${YELLOW}[WARN] 1차 URL 실패, 대체 URL 시도 중...${NC}"
-        rm -f "$KEYSTORE_FILE"
-        curl -L -o "$KEYSTORE_FILE" "$KEYSTORE_URL_FALLBACK" 2>/dev/null
-    fi
-
-    # 파일 존재/크기 확인
-    if [ ! -f "$KEYSTORE_FILE" ]; then
-        echo -e "${RED}[ERROR] 키스토어 다운로드 실패 (파일 없음)${NC}"
+    if [ ! -s "$KEYSTORE_BKS" ]; then
+        echo -e "${RED}[ERROR] 키스토어 파일이 비어 있습니다.${NC}"
         return 1
     fi
 
-    local FILE_SIZE=$(wc -c < "$KEYSTORE_FILE" 2>/dev/null || echo 0)
-    echo -e "${BLUE}[DEBUG] 다운로드된 파일 크기: ${FILE_SIZE} bytes${NC}"
+    local FILE_SIZE=$(wc -c < "$KEYSTORE_BKS")
+    echo -e "${BLUE}[INFO] 다운로드 완료 (${FILE_SIZE} bytes)${NC}"
 
-    if [ "$FILE_SIZE" -lt 100 ]; then
-        echo -e "${RED}[ERROR] 파일이 너무 작습니다 (${FILE_SIZE}B). 다운로드 실패로 보입니다.${NC}"
+    # 2) Bouncy Castle provider 다운로드 (BKS 읽기에 필요)
+    if [ ! -f "$BCPROV_JAR" ] || [ ! -s "$BCPROV_JAR" ]; then
+        echo -e "${YELLOW}[INFO] Bouncy Castle provider 다운로드 중...${NC}"
+        curl -L -o "$BCPROV_JAR" "$BCPROV_URL" 2>/dev/null || {
+            echo -e "${RED}[ERROR] Bouncy Castle 다운로드 실패${NC}"
+            return 1
+        }
+    fi
+
+    if [ ! -s "$BCPROV_JAR" ]; then
+        echo -e "${RED}[ERROR] Bouncy Castle JAR가 비어 있습니다.${NC}"
+        return 1
+    fi
+    echo -e "${GREEN}[OK] Bouncy Castle 준비됨${NC}"
+
+    # 3) BKS 키스토어 읽기 확인
+    echo -e "${BLUE}[INFO] BKS 키스토어 검증 중...${NC}"
+    if ! keytool -list \
+        -providerclass org.bouncycastle.jce.provider.BouncyCastleProvider \
+        -providerpath "$BCPROV_JAR" \
+        -keystore "$KEYSTORE_BKS" \
+        -storetype BKS \
+        -storepass "$KEYSTORE_PASS" >/dev/null 2>&1; then
+        echo -e "${RED}[ERROR] BKS 키스토어 읽기 실패${NC}"
+        echo -e "${YELLOW}[DEBUG] 상세 오류:${NC}"
+        keytool -list \
+            -providerclass org.bouncycastle.jce.provider.BouncyCastleProvider \
+            -providerpath "$BCPROV_JAR" \
+            -keystore "$KEYSTORE_BKS" \
+            -storetype BKS \
+            -storepass "$KEYSTORE_PASS" 2>&1 || true
         return 1
     fi
 
-    # HTML 오다운로드 체크
-    local HEAD_CONTENT=$(head -c 100 "$KEYSTORE_FILE" 2>/dev/null)
-    if echo "$HEAD_CONTENT" | grep -qiE '<!doctype|<html|<head|404|Not Found'; then
-        echo -e "${RED}[ERROR] 키스토어 대신 HTML/에러 페이지가 다운로드됨${NC}"
-        echo -e "${RED}[DEBUG] 파일 시작 내용: $(head -c 50 "$KEYSTORE_FILE")${NC}"
+    # alias 이름 추출
+    local ALIAS_NAME=$(keytool -list \
+        -providerclass org.bouncycastle.jce.provider.BouncyCastleProvider \
+        -providerpath "$BCPROV_JAR" \
+        -keystore "$KEYSTORE_BKS" \
+        -storetype BKS \
+        -storepass "$KEYSTORE_PASS" 2>/dev/null | grep -oP '^[^,]+(?=,)')
+    echo -e "${BLUE}[INFO] 키스토어 별칭(alias): ${ALIAS_NAME:-감지실패}${NC}"
+
+    # 4) BKS → PKCS12 변환
+    echo -e "${YELLOW}[INFO] BKS → PKCS12 변환 중...${NC}"
+    rm -f "$KEYSTORE_P12"
+    keytool -importkeystore -noprompt \
+        -providerclass org.bouncycastle.jce.provider.BouncyCastleProvider \
+        -providerpath "$BCPROV_JAR" \
+        -srckeystore "$KEYSTORE_BKS" \
+        -srcstoretype BKS \
+        -srcstorepass "$KEYSTORE_PASS" \
+        -destkeystore "$KEYSTORE_P12" \
+        -deststoretype PKCS12 \
+        -deststorepass "$KEYSTORE_PASS" \
+        -destkeypass "$KEYSTORE_PASS" 2>&1 || {
+        echo -e "${RED}[ERROR] BKS → PKCS12 변환 실패${NC}"
+        return 1
+    }
+
+    if [ ! -s "$KEYSTORE_P12" ]; then
+        echo -e "${RED}[ERROR] 변환된 PKCS12 파일이 비어 있습니다.${NC}"
         return 1
     fi
 
-    # 첫 바이트 hex 확인 (디버깅)
-    local HEX_HEAD=$(xxd -l 4 -p "$KEYSTORE_FILE" 2>/dev/null || od -A n -t x1 -N 4 "$KEYSTORE_FILE" 2>/dev/null | tr -d ' ')
-    echo -e "${BLUE}[DEBUG] 파일 시작 hex: ${HEX_HEAD}${NC}"
-
-    # patch5.sh 동일: keytool로 타입 감지
-    if keytool -list -keystore "$KEYSTORE_FILE" -storepass "$KEYSTORE_PASS" -storetype PKCS12 >/dev/null 2>&1; then
-        KEYSTORE_TYPE="PKCS12"
-    elif keytool -list -keystore "$KEYSTORE_FILE" -storepass "$KEYSTORE_PASS" -storetype JKS >/dev/null 2>&1; then
-        KEYSTORE_TYPE="JKS"
+    # 5) 변환된 PKCS12 검증
+    if keytool -list -keystore "$KEYSTORE_P12" -storepass "$KEYSTORE_PASS" -storetype PKCS12 >/dev/null 2>&1; then
+        echo -e "${GREEN}[OK] PKCS12 변환 및 검증 성공${NC}"
     else
-        echo -e "${RED}[ERROR] keytool이 키스토어를 읽지 못했습니다.${NC}"
-        echo -e "${YELLOW}[DEBUG] keytool PKCS12 오류:${NC}"
-        keytool -list -keystore "$KEYSTORE_FILE" -storepass "$KEYSTORE_PASS" -storetype PKCS12 2>&1 || true
-        echo -e "${YELLOW}[DEBUG] keytool JKS 오류:${NC}"
-        keytool -list -keystore "$KEYSTORE_FILE" -storepass "$KEYSTORE_PASS" -storetype JKS 2>&1 || true
+        echo -e "${RED}[ERROR] 변환된 PKCS12 검증 실패${NC}"
         return 1
     fi
 
-    echo -e "${GREEN}[OK] 키스토어 타입: $KEYSTORE_TYPE${NC}"
-    KEYSTORE_PATH="$(pwd)/$KEYSTORE_FILE"
     return 0
 }
 
-# --- 서명 ---
+# --- APK 서명 ---
 sign_apk() {
     echo ""
     echo -e "${GREEN}========================================${NC}"
-    echo -e "${GREEN}    APK 서명 시작...${NC}"
+    echo -e "${GREEN}    APK 서명 중...${NC}"
     echo -e "${GREEN}========================================${NC}"
 
-    download_and_verify_keystore || {
-        echo -e "${RED}[ERROR] 키스토어 준비 실패${NC}"
-        return 1
-    }
-
-    # apksigner로 서명
-    echo -e "${BLUE}[INFO] apksigner로 서명 중...${NC}"
-    local SIGNED_APK="/storage/emulated/0/Download/KakaoTalk_Signed.apk"
+    local SIGNED_APK="$BASE_DIR/KakaoTalk_Signed.apk"
     rm -f "$SIGNED_APK"
 
+    echo -e "${BLUE}[INFO] apksigner 서명 실행...${NC}"
     apksigner sign \
-        --ks "$KEYSTORE_PATH" \
+        --ks "$KEYSTORE_P12" \
         --ks-pass "pass:$KEYSTORE_PASS" \
         --key-pass "pass:$KEYSTORE_PASS" \
-        --ks-type "$KEYSTORE_TYPE" \
+        --ks-type PKCS12 \
         --out "$SIGNED_APK" \
         "$MERGED_APK_PATH" || {
-        echo -e "${RED}[ERROR] 서명 실패${NC}"
+        echo -e "${RED}[ERROR] apksigner 서명 실패${NC}"
         return 1
     }
 
-    if [ -f "$SIGNED_APK" ]; then
-        echo ""
-        echo -e "${GREEN}========================================${NC}"
-        echo -e "${GREEN}    서명 완료!${NC}"
-        echo -e "${GREEN}========================================${NC}"
-        echo -e "${GREEN}[SUCCESS] 저장 완료: $SIGNED_APK${NC}"
-    else
+    if [ ! -f "$SIGNED_APK" ]; then
         echo -e "${RED}[ERROR] 서명된 APK 생성 실패${NC}"
         return 1
     fi
+
+    # 서명 검증
+    if apksigner verify "$SIGNED_APK" >/dev/null 2>&1; then
+        echo -e "${GREEN}[OK] 서명 검증 통과${NC}"
+    else
+        echo -e "${RED}[WARN] 서명 검증 실패${NC}"
+    fi
+
+    echo ""
+    echo -e "${GREEN}========================================${NC}"
+    echo -e "${GREEN}    서명 완료!${NC}"
+    echo -e "${GREEN}========================================${NC}"
+    echo -e "${GREEN}[SUCCESS] 저장 완료: $SIGNED_APK${NC}"
+}
+
+# --- 임시 파일 정리 ---
+cleanup() {
+    rm -f "$KEYSTORE_P12" "$MERGED_APK_PATH"
+    echo -e "${BLUE}[INFO] 임시 파일 정리 완료${NC}"
 }
 
 # --- Main ---
@@ -238,15 +290,18 @@ main() {
     clear
     echo -e "${GREEN}======================================${NC}"
     echo -e "${GREEN}  APKM → 서명된 APK (패치 없음)${NC}"
-    echo -e "${GREEN}  (patch5.sh 서명 방식 동일)${NC}"
+    echo -e "${GREEN}  (patch5.sh 동일 키스토어 사용)${NC}"
     echo -e "${GREEN}======================================${NC}"
     echo ""
 
     check_dependencies || exit 1
     get_apkm_file || exit 0
     merge_apkm || exit 1
+    prepare_keystore || exit 1
     sign_apk || exit 1
+    cleanup
 
+    echo ""
     echo -e "${GREEN}모든 작업이 끝났습니다.${NC}"
 }
 
