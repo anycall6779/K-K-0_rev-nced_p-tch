@@ -26,7 +26,7 @@ KEYSTORE_FILE="$SCRIPT_DIR/my_kakao_key.keystore"
 # 기존 "revanced" 강제 지정은 다른 엔트리를 집어 업데이트 실패를 유발할 수 있습니다.
 KEYSTORE_ALIAS=""
 KEYSTORE_PASS="android"
-KEYSTORE_TYPE=""  # 자동 감지 (JKS 또는 PKCS12)
+KEYSTORE_TYPE=""  # 자동 감지 (JKS 또는 PKCS12), 감지 불가 시 자동 모드
 # 고정 keystore 무결성 체크(현재 저장소의 my_kakao_key.keystore와 동일 해시)
 EXPECTED_KEYSTORE_SHA256="AA5AF5D37D84AA6B617C242FBAF3339F5A96F43C28F8604B9C20D4E9CFC3CDD9"
 
@@ -88,9 +88,9 @@ check_dependencies() {
     fi
 
     # 키스토어 유효성 검증 함수 (keytool로 실제 파싱 가능한지 확인, 타입 자동 감지)
-    verify_keystore() {
-        local ks_path="$1"
-        [ ! -f "$ks_path" ] && return 1
+verify_keystore() {
+    local ks_path="$1"
+    [ ! -f "$ks_path" ] && return 1
 
         # PKCS12로 시도
         if keytool -list -keystore "$ks_path" -storepass "$KEYSTORE_PASS" -storetype PKCS12 >/dev/null 2>&1; then
@@ -107,6 +107,16 @@ check_dependencies() {
             KEYSTORE_TYPE="BKS"
             return 0
         fi
+        # 일부 환경(Termux/OpenJDK)에서는 BKS 계열을 keytool이 읽지 못할 수 있습니다.
+        # 이 경우에는 keystore 해시 고정값 일치로 신뢰하고, apksigner 단계에서 최종 검증합니다.
+        local ks_sha256
+        ks_sha256=$(sha256sum "$ks_path" 2>/dev/null | awk '{print toupper($1)}')
+        if [ -n "$ks_sha256" ] && [ "$ks_sha256" = "$EXPECTED_KEYSTORE_SHA256" ]; then
+            KEYSTORE_TYPE=""
+            echo -e "${YELLOW}[WARN] keytool 타입 감지 실패. 해시 일치 키스토어로 계속 진행합니다.${NC}"
+            return 0
+        fi
+
         return 1
     }
 
@@ -155,9 +165,9 @@ download_keystore() {
                     continue
                 fi
 
-                # keytool로 유효성 검증 (타입 자동 감지)
+                # keytool 유효성 검증 (또는 해시 고정값 기반 fallback)
                 if verify_keystore "$KEYSTORE_FILE"; then
-                    echo -e "${GREEN}[OK] 키스토어 다운로드/해시/유효성 검증 완료 (타입: ${KEYSTORE_TYPE})${NC}"
+                    echo -e "${GREEN}[OK] 키스토어 다운로드/해시/검증 완료 (타입: ${KEYSTORE_TYPE:-auto})${NC}"
                     DOWNLOADED=1
                     break
                 else
