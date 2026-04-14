@@ -146,39 +146,78 @@ prepare_keystore() {
     echo -e "${GREEN}    키스토어 준비 중...${NC}"
     echo -e "${GREEN}========================================${NC}"
 
-    # 1) BKS 키스토어 다운로드 (patch5.sh 동일 URL, 동일 curl 플래그)
-    echo -e "${YELLOW}[INFO] 고정 키스토어 다운로드 중...${NC}"
-    rm -f "$KEYSTORE_BKS"
-    curl -L -o "$KEYSTORE_BKS" "$KEYSTORE_URL" || {
-        echo -e "${RED}[ERROR] 키스토어 다운로드 실패!${NC}"
-        return 1
-    }
+    # 1) 로컬 키스토어 확인 (workspace 또는 WORK_DIR)
+    local LOCAL_KEYSTORE_PATHS=(
+        "$WORK_DIR/my_kakao_key.keystore"
+        "$HOME/my_kakao_key.keystore"
+        "$BASE_DIR/my_kakao_key.keystore"
+    )
+    
+    for path in "${LOCAL_KEYSTORE_PATHS[@]}"; do
+        if [ -f "$path" ] && [ -s "$path" ]; then
+            echo -e "${GREEN}[OK] 로컬 키스토어 발견: $path${NC}"
+            KEYSTORE_BKS="$path"
+            local FILE_SIZE=$(wc -c < "$KEYSTORE_BKS")
+            echo -e "${BLUE}[INFO] 파일 크기: ${FILE_SIZE} bytes${NC}"
+            break
+        fi
+    done
+    
+    # 2) 로컬 파일이 없으면 GitHub에서 다운로드
+    if [ ! -f "$KEYSTORE_BKS" ] || [ ! -s "$KEYSTORE_BKS" ]; then
+        echo -e "${YELLOW}[INFO] 고정 키스토어 다운로드 중...${NC}"
+        rm -f "$WORK_DIR/my_kakao_key.keystore"
+        KEYSTORE_BKS="$WORK_DIR/my_kakao_key.keystore"
+        
+        curl -L --max-time 30 --retry 3 --retry-delay 2 \
+            -o "$KEYSTORE_BKS" "$KEYSTORE_URL" || {
+            echo -e "${RED}[ERROR] 키스토어 다운로드 실패!${NC}"
+            return 1
+        }
 
-    if [ ! -s "$KEYSTORE_BKS" ]; then
-        echo -e "${RED}[ERROR] 키스토어 파일이 비어 있습니다.${NC}"
-        return 1
+        if [ ! -s "$KEYSTORE_BKS" ]; then
+            echo -e "${RED}[ERROR] 키스토어 파일이 비어 있습니다.${NC}"
+            return 1
+        fi
+
+        local FILE_SIZE=$(wc -c < "$KEYSTORE_BKS")
+        echo -e "${BLUE}[INFO] 다운로드 완료 (${FILE_SIZE} bytes)${NC}"
+        
+        # 파일 형식 검증 (최소 크기 확인)
+        if [ "$FILE_SIZE" -lt 1000 ]; then
+            echo -e "${RED}[ERROR] 다운로드된 파일 크기가 너무 작습니다 (손상 가능성)${NC}"
+            rm -f "$KEYSTORE_BKS"
+            return 1
+        fi
     fi
 
-    local FILE_SIZE=$(wc -c < "$KEYSTORE_BKS")
-    echo -e "${BLUE}[INFO] 다운로드 완료 (${FILE_SIZE} bytes)${NC}"
-
-    # 2) Bouncy Castle provider 다운로드 (BKS 읽기에 필요)
+    # 3) Bouncy Castle provider 다운로드 (BKS 읽기에 필요)
     if [ ! -f "$BCPROV_JAR" ] || [ ! -s "$BCPROV_JAR" ]; then
         echo -e "${YELLOW}[INFO] Bouncy Castle provider 다운로드 중...${NC}"
-        curl -L -o "$BCPROV_JAR" "$BCPROV_URL" 2>/dev/null || {
+        rm -f "$BCPROV_JAR"
+        curl -L --max-time 60 --retry 3 --retry-delay 2 \
+            -o "$BCPROV_JAR" "$BCPROV_URL" 2>/dev/null || {
             echo -e "${RED}[ERROR] Bouncy Castle 다운로드 실패${NC}"
+            echo -e "${YELLOW}[INFO] Maven 저장소 URL 확인: $BCPROV_URL${NC}"
             return 1
         }
     fi
 
     if [ ! -s "$BCPROV_JAR" ]; then
         echo -e "${RED}[ERROR] Bouncy Castle JAR가 비어 있습니다.${NC}"
+        rm -f "$BCPROV_JAR"
         return 1
+    fi
+    
+    # JAR 파일 유효성 검증 (ZIP 형식 확인)
+    if ! file "$BCPROV_JAR" 2>/dev/null | grep -q "ZIP\|Java"; then
+        echo -e "${YELLOW}[WARN] Bouncy Castle JAR 형식이 예상과 다를 수 있습니다.${NC}"
     fi
     echo -e "${GREEN}[OK] Bouncy Castle 준비됨${NC}"
 
-    # 3) BKS 키스토어 읽기 확인
+    # 4) BKS 키스토어 읽기 확인
     echo -e "${BLUE}[INFO] BKS 키스토어 검증 중...${NC}"
+    
     if ! keytool -list \
         -providerclass org.bouncycastle.jce.provider.BouncyCastleProvider \
         -providerpath "$BCPROV_JAR" \
@@ -193,22 +232,36 @@ prepare_keystore() {
             -keystore "$KEYSTORE_BKS" \
             -storetype BKS \
             -storepass "$KEYSTORE_PASS" 2>&1 || true
+        
+        echo ""
+        echo -e "${YELLOW}[공략] 문제 해결:${NC}"
+        echo -e "  1. GitHub URL에서 다시 다운로드: curl -L -o /tmp/keystore.bks \"$KEYSTORE_URL\""
+        echo -e "  2. 로컬 keystore 파일 확인: file \"$KEYSTORE_BKS\""
+        echo -e "  3. Bouncy Castle JAR 재설치: rm \"$BCPROV_JAR\""
         return 1
     fi
 
     # alias 이름 추출
+    echo -e "${BLUE}[INFO] 키스토어 별칭 조회 중...${NC}"
     local ALIAS_NAME=$(keytool -list \
         -providerclass org.bouncycastle.jce.provider.BouncyCastleProvider \
         -providerpath "$BCPROV_JAR" \
         -keystore "$KEYSTORE_BKS" \
         -storetype BKS \
-        -storepass "$KEYSTORE_PASS" 2>/dev/null | grep -oP '^[^,]+(?=,)')
-    echo -e "${BLUE}[INFO] 키스토어 별칭(alias): ${ALIAS_NAME:-감지실패}${NC}"
+        -storepass "$KEYSTORE_PASS" 2>/dev/null | grep -oP '^[^,]+(?=,)' | head -1)
+    
+    if [ -z "$ALIAS_NAME" ]; then
+        echo -e "${YELLOW}[WARN] 별칭 감지 실패 (계속 진행)${NC}"
+        ALIAS_NAME="mykey"
+    else
+        echo -e "${BLUE}[INFO] 키스토어 별칭(alias): $ALIAS_NAME${NC}"
+    fi
 
-    # 4) BKS → PKCS12 변환
+    # 5) BKS → PKCS12 변환
     echo -e "${YELLOW}[INFO] BKS → PKCS12 변환 중...${NC}"
     rm -f "$KEYSTORE_P12"
-    keytool -importkeystore -noprompt \
+    
+    if ! keytool -importkeystore -noprompt \
         -providerclass org.bouncycastle.jce.provider.BouncyCastleProvider \
         -providerpath "$BCPROV_JAR" \
         -srckeystore "$KEYSTORE_BKS" \
@@ -217,21 +270,27 @@ prepare_keystore() {
         -destkeystore "$KEYSTORE_P12" \
         -deststoretype PKCS12 \
         -deststorepass "$KEYSTORE_PASS" \
-        -destkeypass "$KEYSTORE_PASS" 2>&1 || {
+        -destkeypass "$KEYSTORE_PASS" 2>&1 | tee /tmp/convert_log.txt; then
         echo -e "${RED}[ERROR] BKS → PKCS12 변환 실패${NC}"
+        echo -e "${YELLOW}[LOG] 변환 로그:${NC}"
+        cat /tmp/convert_log.txt
         return 1
-    }
+    fi
 
     if [ ! -s "$KEYSTORE_P12" ]; then
         echo -e "${RED}[ERROR] 변환된 PKCS12 파일이 비어 있습니다.${NC}"
         return 1
     fi
+    echo -e "${GREEN}[OK] BKS → PKCS12 변환 성공${NC}"
 
-    # 5) 변환된 PKCS12 검증
+    # 6) 변환된 PKCS12 검증
+    echo -e "${BLUE}[INFO] PKCS12 검증 중...${NC}"
     if keytool -list -keystore "$KEYSTORE_P12" -storepass "$KEYSTORE_PASS" -storetype PKCS12 >/dev/null 2>&1; then
         echo -e "${GREEN}[OK] PKCS12 변환 및 검증 성공${NC}"
     else
         echo -e "${RED}[ERROR] 변환된 PKCS12 검증 실패${NC}"
+        echo -e "${YELLOW}[DEBUG] PKCS12 상세 정보:${NC}"
+        keytool -list -keystore "$KEYSTORE_P12" -storepass "$KEYSTORE_PASS" -storetype PKCS12 2>&1 || true
         return 1
     fi
 
