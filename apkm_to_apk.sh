@@ -29,6 +29,8 @@ KEYSTORE_PASS="android"
 KEYSTORE_TYPE=""  # 자동 감지 (JKS 또는 PKCS12), 감지 불가 시 자동 모드
 # 고정 keystore 무결성 체크(현재 저장소의 my_kakao_key.keystore와 동일 해시)
 EXPECTED_KEYSTORE_SHA256="AA5AF5D37D84AA6B617C242FBAF3339F5A96F43C28F8604B9C20D4E9CFC3CDD9"
+BCPROV_JAR="$SCRIPT_DIR/bcprov-jdk18on-1.78.1.jar"
+BCPROV_URL="https://repo1.maven.org/maven2/org/bouncycastle/bcprov-jdk18on/1.78.1/bcprov-jdk18on-1.78.1.jar"
 
 extract_apk_sha256() {
     local apk_path="$1"
@@ -59,7 +61,7 @@ check_dependencies() {
         fi
     }
 
-    for cmd in unzip java curl zipalign apksigner; do
+    for cmd in unzip java curl zipalign apksigner keytool sha256sum; do
         if ! command -v $cmd &> /dev/null; then
             install_pkg $cmd
         fi
@@ -87,6 +89,16 @@ check_dependencies() {
         curl -L -o "$EDITOR_JAR" "https://github.com/REAndroid/APKEditor/releases/download/V1.4.5/APKEditor-1.4.5.jar" || exit 1
     fi
 
+    ensure_bcprov() {
+        if [ -f "$BCPROV_JAR" ]; then
+            return 0
+        fi
+        echo -e "${YELLOW}[INFO] Bouncy Castle provider 다운로드 중...${NC}"
+        curl -L -f --connect-timeout 15 --max-time 60 -o "$BCPROV_JAR" "$BCPROV_URL" >/dev/null 2>&1 || return 1
+        [ -s "$BCPROV_JAR" ] || return 1
+        return 0
+    }
+
     # 키스토어 유효성 검증 함수 (keytool로 실제 파싱 가능한지 확인, 타입 자동 감지)
 verify_keystore() {
     local ks_path="$1"
@@ -107,14 +119,29 @@ verify_keystore() {
             KEYSTORE_TYPE="BKS"
             return 0
         fi
-        # 일부 환경(Termux/OpenJDK)에서는 BKS 계열을 keytool이 읽지 못할 수 있습니다.
-        # 이 경우에는 keystore 해시 고정값 일치로 신뢰하고, apksigner 단계에서 최종 검증합니다.
+        # 일부 환경(Termux/OpenJDK)에서는 BKS 계열을 keytool/apksigner가 직접 읽지 못합니다.
+        # 고정 해시가 맞는 경우 BKS -> PKCS12로 변환해 apksigner 호환 형태로 맞춥니다.
         local ks_sha256
         ks_sha256=$(sha256sum "$ks_path" 2>/dev/null | awk '{print toupper($1)}')
         if [ -n "$ks_sha256" ] && [ "$ks_sha256" = "$EXPECTED_KEYSTORE_SHA256" ]; then
-            KEYSTORE_TYPE=""
-            echo -e "${YELLOW}[WARN] keytool 타입 감지 실패. 해시 일치 키스토어로 계속 진행합니다.${NC}"
-            return 0
+            local converted_ks="$SCRIPT_DIR/my_kakao_key.pkcs12"
+            if ensure_bcprov && keytool -importkeystore -noprompt \
+                -providerclass org.bouncycastle.jce.provider.BouncyCastleProvider \
+                -providerpath "$BCPROV_JAR" \
+                -srckeystore "$ks_path" \
+                -srcstoretype BKS \
+                -srcstorepass "$KEYSTORE_PASS" \
+                -destkeystore "$converted_ks" \
+                -deststoretype PKCS12 \
+                -deststorepass "$KEYSTORE_PASS" \
+                -destkeypass "$KEYSTORE_PASS" >/dev/null 2>&1; then
+                KEYSTORE_FILE="$converted_ks"
+                KEYSTORE_TYPE="PKCS12"
+                echo -e "${YELLOW}[WARN] keytool 타입 감지 실패. BKS -> PKCS12 변환 후 진행합니다.${NC}"
+                return 0
+            fi
+            echo -e "${RED}[ERROR] 고정 키스토어를 PKCS12로 변환하지 못했습니다.${NC}"
+            return 1
         fi
 
         return 1
@@ -274,6 +301,7 @@ merge_and_sign() {
         exit 1
     fi
     local KS_SIZE=$(wc -c < "$KEYSTORE_FILE" 2>/dev/null || echo 0)
+    echo -e "${BLUE}[DEBUG] 키스토어: ${KEYSTORE_FILE}${NC}"
     echo -e "${BLUE}[DEBUG] 키스토어 크기: ${KS_SIZE}B / 타입: ${KEYSTORE_TYPE:-자동}${NC}"
 
     # apksigner 서명 명령 구성
