@@ -17,6 +17,10 @@ NC='\033[0m'
 BASE_DIR="/storage/emulated/0/Download"
 MERGED_APK_PATH="$BASE_DIR/KakaoTalk_Merged.apk"
 EDITOR_JAR="$BASE_DIR/APKEditor-1.4.5.jar"
+KEYSTORE_URL="https://github.com/anycall6779/K-K-0_rev-nced_p-tch/raw/refs/heads/main/my_kakao_key.keystore"
+KEYSTORE_FILE="$BASE_DIR/my_kakao_key.keystore"
+KEYSTORE_PASS="android"
+KEYSTORE_TYPE=""
 
 check_dependencies() {
     echo -e "${BLUE}[INFO] 필수 도구 확인 중...${NC}"
@@ -31,13 +35,13 @@ check_dependencies() {
         command -v "$cmd" >/dev/null 2>&1 || missing=1
     }
 
-    for cmd in curl unzip java; do
+    for cmd in curl unzip java apksigner keytool; do
         command -v "$cmd" >/dev/null 2>&1 || install_cmd "$cmd"
     done
 
     if [ "$missing" -eq 1 ]; then
         echo -e "${RED}[ERROR] 필수 도구 설치 실패. 수동 설치 후 다시 실행하세요.${NC}"
-        echo -e "${YELLOW}pkg install unzip curl openjdk-17${NC}"
+        echo -e "${YELLOW}pkg install unzip curl openjdk-17 apksigner${NC}"
         exit 1
     fi
 
@@ -51,6 +55,26 @@ check_dependencies() {
     fi
 
     echo -e "${GREEN}[OK] 준비 완료${NC}"
+}
+
+prepare_keystore() {
+    echo -e "${YELLOW}[INFO] 고정 키스토어 다운로드 중...${NC}"
+    rm -f "$KEYSTORE_FILE"
+    curl -L -o "$KEYSTORE_FILE" "$KEYSTORE_URL" >/dev/null 2>&1 || {
+        echo -e "${RED}[ERROR] 키스토어 다운로드 실패${NC}"
+        return 1
+    }
+
+    if keytool -list -keystore "$KEYSTORE_FILE" -storepass "$KEYSTORE_PASS" -storetype PKCS12 >/dev/null 2>&1; then
+        KEYSTORE_TYPE="PKCS12"
+    elif keytool -list -keystore "$KEYSTORE_FILE" -storepass "$KEYSTORE_PASS" -storetype JKS >/dev/null 2>&1; then
+        KEYSTORE_TYPE="JKS"
+    else
+        echo -e "${RED}[ERROR] 키스토어 유효성 확인 실패${NC}"
+        return 1
+    fi
+
+    echo -e "${GREEN}[OK] 키스토어 타입: $KEYSTORE_TYPE${NC}"
 }
 
 get_apkm_file() {
@@ -130,6 +154,31 @@ merge_apkm() {
     echo -e "${GREEN}[SUCCESS] 병합 완료: $MERGED_APK_PATH${NC}"
 }
 
+sign_merged_apk() {
+    echo -e "${BLUE}[INFO] 병합 APK 서명 중(apksigner)...${NC}"
+    local signed_apk="$BASE_DIR/KakaoTalk_Merged_signed.apk"
+    rm -f "$signed_apk"
+
+    apksigner sign \
+        --ks "$KEYSTORE_FILE" \
+        --ks-pass "pass:$KEYSTORE_PASS" \
+        --key-pass "pass:$KEYSTORE_PASS" \
+        --ks-type "$KEYSTORE_TYPE" \
+        --out "$signed_apk" \
+        "$MERGED_APK_PATH" || {
+        echo -e "${RED}[ERROR] APK 서명 실패${NC}"
+        return 1
+    }
+
+    apksigner verify "$signed_apk" >/dev/null 2>&1 || {
+        echo -e "${RED}[ERROR] 서명 검증 실패${NC}"
+        return 1
+    }
+
+    mv -f "$signed_apk" "$MERGED_APK_PATH"
+    echo -e "${GREEN}[SUCCESS] 서명 완료: $MERGED_APK_PATH${NC}"
+}
+
 main() {
     clear
     echo -e "${GREEN}======================================${NC}"
@@ -138,8 +187,10 @@ main() {
     echo ""
 
     check_dependencies
+    prepare_keystore || exit 1
     get_apkm_file || exit 1
     merge_apkm || exit 1
+    sign_merged_apk || exit 1
 
     echo ""
     echo -e "${GREEN}모든 작업이 끝났습니다.${NC}"
