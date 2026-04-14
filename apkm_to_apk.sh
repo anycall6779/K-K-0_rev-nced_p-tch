@@ -47,7 +47,7 @@ check_dependencies() {
         fi
     }
 
-    for cmd in unzip java wget zipalign apksigner; do
+    for cmd in unzip java curl zipalign apksigner; do
         if ! command -v $cmd &> /dev/null; then
             install_pkg $cmd
         fi
@@ -64,7 +64,7 @@ check_dependencies() {
     
     if [ $MISSING -eq 1 ]; then
         echo -e "${RED}[ERROR] 일부 도구를 자동 설치할 수 없습니다.${NC}"
-        echo -e "${RED}수동으로 설치를 확인해주세요: pkg install unzip openjdk-17 wget apksigner${NC}"
+        echo -e "${RED}수동으로 설치를 확인해주세요: pkg install unzip openjdk-17 curl apksigner${NC}"
         exit 1
     fi
     
@@ -72,13 +72,16 @@ check_dependencies() {
     
     if [ ! -f "$EDITOR_JAR" ]; then
         echo -e "${YELLOW}[INFO] 병합 툴(APKEditor) 다운로드 중...${NC}"
-        wget --quiet --show-progress -O "$EDITOR_JAR" "https://github.com/REAndroid/APKEditor/releases/download/V1.4.5/APKEditor-1.4.5.jar" || exit 1
+        curl -L -o "$EDITOR_JAR" "https://github.com/REAndroid/APKEditor/releases/download/V1.4.5/APKEditor-1.4.5.jar" || exit 1
     fi
 
-    if [ ! -f "$KEYSTORE_FILE" ]; then
-        echo -e "${YELLOW}[INFO] 서명 키스토어 다운로드 중...${NC}"
-        wget --quiet -O "$KEYSTORE_FILE" "$KEYSTORE_URL" || exit 1
-    fi
+    # 키스토어는 항상 새로 다운로드 (깨진 파일 방지)
+    echo -e "${YELLOW}[INFO] 서명 키스토어 다운로드 중...${NC}"
+    rm -f "$KEYSTORE_FILE"
+    curl -L -o "$KEYSTORE_FILE" "$KEYSTORE_URL" || {
+        echo -e "${RED}[ERROR] 키스토어 다운로드 실패! 인터넷 연결이나 URL을 확인하세요.${NC}"
+        exit 1
+    }
 }
 
 get_apkm_file() {
@@ -143,7 +146,7 @@ merge_and_sign() {
     echo -e "${BLUE}[3/4] Zipalign 파일 최적화 중...${NC}"
     rm -f "$ALIGNED_APK"
     if command -v zipalign &> /dev/null; then
-        zipalign -p -f 4 "$MERGED_APK" "$ALIGNED_APK"
+        zipalign -p -f 4 "$MERGED_APK" "$ALIGNED_APK" || true
         if [ -f "$ALIGNED_APK" ]; then
             mv "$ALIGNED_APK" "$MERGED_APK"
             echo -e "${GREEN}[OK] Zipalign 최적화 완료${NC}"
