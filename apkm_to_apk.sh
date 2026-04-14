@@ -40,52 +40,14 @@ check_dependencies() {
         if [ "$cmd" = "java" ]; then pkg="openjdk-17"; fi
         
         echo -e "${YELLOW}[WARN] '$cmd' 명령어가 없습니다. 설치 시도 중...${NC}"
-        
-        if [ "$cmd" = "zipalign" ]; then
-            echo -e "${YELLOW}[INFO] 제공된 저장소에서 zipalign을 찾을 수 없어 직접 다운로드합니다...${NC}"
-            
-            local BIN_DIR="$PREFIX/bin"
-            if [ -z "$PREFIX" ]; then
-                BIN_DIR="/data/data/com.termux/files/usr/bin"
-            fi
-            local ZIPALIGN_BIN="$BIN_DIR/zipalign"
-            
-            local ARCH=$(uname -m)
-            local URL="https://github.com/rendiix/termux-zipalign/releases/download/v1.0/zipalign_arm64-v8a"
-            
-            if [[ "$ARCH" == *"arm"* ]] && [[ "$ARCH" != "aarch64" ]]; then
-                URL="https://github.com/rendiix/termux-zipalign/releases/download/v1.0/zipalign_armeabi-v7a"
-            elif [[ "$ARCH" == "x86_64" ]]; then
-                URL="https://github.com/rendiix/termux-zipalign/releases/download/v1.0/zipalign_x86_64"
-            elif [[ "$ARCH" == "i686" ]]; then
-                URL="https://github.com/rendiix/termux-zipalign/releases/download/v1.0/zipalign_i686"
-            fi
-            
-            # 다운로드 시도 (set -e 에 의해 스크립트가 멈추지 않도록 처리)
-            echo -e "${YELLOW}URL: $URL${NC}"
-            if wget -q --show-progress -O "$ZIPALIGN_BIN" "$URL"; then
-                chmod +x "$ZIPALIGN_BIN" || true
-            else
-                echo -e "${YELLOW}[INFO] 시스템 bin 디렉토리에 설치 실패. 로컬 디렉토리에 설치를 시도합니다.${NC}"
-                mkdir -p "$SCRIPT_DIR/bin"
-                ZIPALIGN_BIN="$SCRIPT_DIR/bin/zipalign"
-                wget -q --show-progress -O "$ZIPALIGN_BIN" "$URL" || true
-                if [ -f "$ZIPALIGN_BIN" ]; then
-                    chmod +x "$ZIPALIGN_BIN" || true
-                    # PATH에 임시 추가
-                    export PATH="$SCRIPT_DIR/bin:$PATH"
-                fi
-            fi
-        else
-            pkg install -y $pkg || apt install -y $pkg || true
-        fi
+        pkg install -y $pkg || apt install -y $pkg || true
         
         if ! command -v $cmd &> /dev/null; then
             MISSING=1
         fi
     }
 
-    for cmd in unzip java wget apksigner zipalign; do
+    for cmd in unzip java wget apksigner; do
         if ! command -v $cmd &> /dev/null; then
             install_pkg $cmd
         fi
@@ -93,7 +55,7 @@ check_dependencies() {
     
     if [ $MISSING -eq 1 ]; then
         echo -e "${RED}[ERROR] 일부 도구를 자동 설치할 수 없습니다.${NC}"
-        echo -e "${RED}수동으로 설치를 확인해주세요: pkg install unzip openjdk-17 wget apksigner zipalign${NC}"
+        echo -e "${RED}수동으로 설치를 확인해주세요: pkg install unzip openjdk-17 wget apksigner${NC}"
         exit 1
     fi
     
@@ -169,17 +131,15 @@ merge_and_sign() {
         exit 1
     fi
     
-    echo -e "${BLUE}[3/4] Zipalign 파일 최적화 중...${NC}"
-    rm -f "$ALIGNED_APK"
-    zipalign -p -f 4 "$MERGED_APK" "$ALIGNED_APK"
+    echo -e "${YELLOW}[INFO] Zipalign 최적화는 패스합니다.${NC}"
     
-    echo -e "${BLUE}[4/4] apksigner를 이용해 키스토어로 서명 중...${NC}"
+    echo -e "${BLUE}[3/3] apksigner를 이용해 키스토어로 서명 중...${NC}"
     rm -f "$FINAL_APK"
     apksigner sign --ks "$KEYSTORE_FILE" \
         --ks-key-alias "$KEYSTORE_ALIAS" \
         --ks-pass "pass:$KEYSTORE_PASS" \
         --key-pass "pass:$KEYSTORE_PASS" \
-        --out "$FINAL_APK" "$ALIGNED_APK"
+        --out "$FINAL_APK" "$MERGED_APK"
 
     if [ -f "$FINAL_APK" ]; then
         echo -e "\n${GREEN}[============= 성공! =============]${NC}"
@@ -189,7 +149,7 @@ merge_and_sign() {
     fi
 
     echo -e "${YELLOW}임시 파일 정리 중...${NC}"
-    rm -rf "$TEMP_DIR" "$MERGED_APK" "$ALIGNED_APK"
+    rm -rf "$TEMP_DIR" "$MERGED_APK"
 }
 
 main() {
