@@ -142,46 +142,30 @@ prepare_keystore() {
     echo -e "${GREEN}    키스토어 준비 중...${NC}"
     echo -e "${GREEN}========================================${NC}"
 
-    # 1) 로컬 키스토어 우선 확인
-    local FOUND_LOCAL=0
-    local LOCAL_KEYSTORE_PATHS=(
-        "$WORK_DIR/my_kakao_key.keystore"
-        "$HOME/my_kakao_key.keystore"
-        "$BASE_DIR/my_kakao_key.keystore"
-    )
+    mkdir -p "$WORK_DIR"
     
-    for path in "${LOCAL_KEYSTORE_PATHS[@]}"; do
-        if [ -f "$path" ] && [ -s "$path" ]; then
-            local FILE_SIZE=$(wc -c < "$path")
-            echo -e "${BLUE}[INFO] 로컬 키스토어 사용: $path (${FILE_SIZE} bytes)${NC}"
-            KEYSTORE_BKS="$path"
-            FOUND_LOCAL=1
-            break
-        fi
-    done
+    # 항상 GitHub에서 다운로드 (로컬 손상 파일 무시)
+    echo -e "${YELLOW}[INFO] GitHub에서 키스토어 다운로드 중...${NC}"
     
-    # 2) 로컬 파일이 없으면 GitHub에서 다운로드 (patch5.sh와 동일)
-    if [ $FOUND_LOCAL -eq 0 ]; then
-        echo -e "${YELLOW}[INFO] GitHub에서 키스토어 다운로드 중...${NC}"
-        mkdir -p "$WORK_DIR"
-        
-        # patch5.sh와 동일한 curl 옵션 사용
-        if ! curl -L -o "$WORK_DIR/my_kakao_key.keystore" "$KEYSTORE_URL"; then
-            echo -e "${RED}[ERROR] 키스토어 다운로드 실패!${NC}"
-            return 1
-        fi
-
-        if [ ! -s "$WORK_DIR/my_kakao_key.keystore" ]; then
-            echo -e "${RED}[ERROR] 다운로드된 키스토어가 비어 있습니다.${NC}"
-            return 1
-        fi
-
-        local FILE_SIZE=$(wc -c < "$WORK_DIR/my_kakao_key.keystore")
-        echo -e "${BLUE}[INFO] 다운로드 완료 (${FILE_SIZE} bytes)${NC}"
-        KEYSTORE_BKS="$WORK_DIR/my_kakao_key.keystore"
+    # 기존 파일 삭제
+    rm -f "$KEYSTORE_BKS"
+    
+    # patch5.sh와 동일한 curl 옵션 사용
+    if ! curl -L -o "$KEYSTORE_BKS" "$KEYSTORE_URL"; then
+        echo -e "${RED}[ERROR] 키스토어 다운로드 실패!${NC}"
+        return 1
     fi
 
-    # 3) 키스토어 형식 감지 및 검증 (patch5.sh와 동일)
+    if [ ! -s "$KEYSTORE_BKS" ]; then
+        echo -e "${RED}[ERROR] 다운로드된 키스토어가 비어 있습니다.${NC}"
+        rm -f "$KEYSTORE_BKS"
+        return 1
+    fi
+
+    local FILE_SIZE=$(wc -c < "$KEYSTORE_BKS")
+    echo -e "${BLUE}[INFO] 다운로드 완료 (${FILE_SIZE} bytes)${NC}"
+
+    # 키스토어 형식 감지 및 검증 (patch5.sh와 동일)
     echo -e "${BLUE}[INFO] 키스토어 형식 감지 중...${NC}"
     
     if keytool -list -keystore "$KEYSTORE_BKS" -storepass "$KEYSTORE_PASS" -storetype PKCS12 >/dev/null 2>&1; then
@@ -194,6 +178,10 @@ prepare_keystore() {
         echo -e "${RED}[ERROR] 키스토어 형식을 읽을 수 없습니다!${NC}"
         echo -e "${YELLOW}[DEBUG] keytool 상세 정보:${NC}"
         keytool -list -keystore "$KEYSTORE_BKS" -storepass "$KEYSTORE_PASS" -storetype PKCS12 2>&1 || true
+        echo ""
+        echo -e "${YELLOW}[솔루션]${NC}"
+        echo -e "  GitHub URL에서 새 keystore 다운로드 시도..."
+        echo -e "  curl -L -o /tmp/ks_test.keystore \"$KEYSTORE_URL\""
         return 1
     fi
 
