@@ -17,20 +17,12 @@ BASE_DIR="/storage/emulated/0/Download"
 SCRIPT_DIR="$HOME/apkm_to_apk"
 EDITOR_JAR="$BASE_DIR/APKEditor-1.4.5.jar"
 
-# Keystore 설정
-KEYSTORE_URL_1="https://raw.githubusercontent.com/anycall6779/K-K-0_rev-nced_p-tch/main/my_kakao_key.keystore"
-KEYSTORE_URL_2="https://github.com/anycall6779/K-K-0_rev-nced_p-tch/raw/refs/heads/main/my_kakao_key.keystore"
-KEYSTORE_URL_3="https://github.com/anycall6779/K-K-0_rev-nced_p-tch/raw/main/my_kakao_key.keystore"
+# Keystore 설정 (patch5.sh 방식 그대로)
+KEYSTORE_URL="https://github.com/anycall6779/K-K-0_rev-nced_p-tch/raw/refs/heads/main/my_kakao_key.keystore"
 KEYSTORE_FILE="$SCRIPT_DIR/my_kakao_key.keystore"
-# alias를 강제하지 않고 keystore의 기본(유일) 엔트리를 사용합니다.
-# 기존 "revanced" 강제 지정은 다른 엔트리를 집어 업데이트 실패를 유발할 수 있습니다.
 KEYSTORE_ALIAS=""
 KEYSTORE_PASS="android"
-KEYSTORE_TYPE=""  # 자동 감지 (JKS 또는 PKCS12), 감지 불가 시 자동 모드
-# 고정 keystore 무결성 체크(현재 저장소의 my_kakao_key.keystore와 동일 해시)
-EXPECTED_KEYSTORE_SHA256="AA5AF5D37D84AA6B617C242FBAF3339F5A96F43C28F8604B9C20D4E9CFC3CDD9"
-BCPROV_JAR="$SCRIPT_DIR/bcprov-jdk18on-1.78.1.jar"
-BCPROV_URL="https://repo1.maven.org/maven2/org/bouncycastle/bcprov-jdk18on/1.78.1/bcprov-jdk18on-1.78.1.jar"
+KEYSTORE_TYPE=""  # PKCS12 또는 JKS 감지
 
 extract_apk_sha256() {
     local apk_path="$1"
@@ -61,7 +53,7 @@ check_dependencies() {
         fi
     }
 
-    for cmd in unzip java curl zipalign apksigner keytool sha256sum; do
+    for cmd in unzip java curl zipalign apksigner keytool; do
         if ! command -v $cmd &> /dev/null; then
             install_pkg $cmd
         fi
@@ -89,131 +81,35 @@ check_dependencies() {
         curl -L -o "$EDITOR_JAR" "https://github.com/REAndroid/APKEditor/releases/download/V1.4.5/APKEditor-1.4.5.jar" || exit 1
     fi
 
-    ensure_bcprov() {
-        if [ -f "$BCPROV_JAR" ]; then
-            return 0
-        fi
-        echo -e "${YELLOW}[INFO] Bouncy Castle provider 다운로드 중...${NC}"
-        curl -L -f --connect-timeout 15 --max-time 60 -o "$BCPROV_JAR" "$BCPROV_URL" >/dev/null 2>&1 || return 1
-        [ -s "$BCPROV_JAR" ] || return 1
-        return 0
-    }
+    # patch5.sh와 동일하게 keytool로 타입을 PKCS12/JKS로만 감지합니다.
+    verify_keystore() {
+        local ks_path="$1"
+        [ ! -f "$ks_path" ] && return 1
 
-    # 키스토어 유효성 검증 함수 (keytool로 실제 파싱 가능한지 확인, 타입 자동 감지)
-verify_keystore() {
-    local ks_path="$1"
-    [ ! -f "$ks_path" ] && return 1
-
-        # PKCS12로 시도
         if keytool -list -keystore "$ks_path" -storepass "$KEYSTORE_PASS" -storetype PKCS12 >/dev/null 2>&1; then
             KEYSTORE_TYPE="PKCS12"
             return 0
         fi
-        # JKS로 시도
         if keytool -list -keystore "$ks_path" -storepass "$KEYSTORE_PASS" -storetype JKS >/dev/null 2>&1; then
             KEYSTORE_TYPE="JKS"
             return 0
         fi
-        # BKS로 시도 (Bouncy Castle, Termux 환경에서 가끔 사용)
-        if keytool -list -keystore "$ks_path" -storepass "$KEYSTORE_PASS" -storetype BKS >/dev/null 2>&1; then
-            KEYSTORE_TYPE="BKS"
-            return 0
-        fi
-        # 일부 환경(Termux/OpenJDK)에서는 BKS 계열을 keytool/apksigner가 직접 읽지 못합니다.
-        # 고정 해시가 맞는 경우 BKS -> PKCS12로 변환해 apksigner 호환 형태로 맞춥니다.
-        local ks_sha256
-        ks_sha256=$(sha256sum "$ks_path" 2>/dev/null | awk '{print toupper($1)}')
-        if [ -n "$ks_sha256" ] && [ "$ks_sha256" = "$EXPECTED_KEYSTORE_SHA256" ]; then
-            local converted_ks="$SCRIPT_DIR/my_kakao_key.pkcs12"
-            if ensure_bcprov && keytool -importkeystore -noprompt \
-                -providerclass org.bouncycastle.jce.provider.BouncyCastleProvider \
-                -providerpath "$BCPROV_JAR" \
-                -srckeystore "$ks_path" \
-                -srcstoretype BKS \
-                -srcstorepass "$KEYSTORE_PASS" \
-                -destkeystore "$converted_ks" \
-                -deststoretype PKCS12 \
-                -deststorepass "$KEYSTORE_PASS" \
-                -destkeypass "$KEYSTORE_PASS" >/dev/null 2>&1; then
-                KEYSTORE_FILE="$converted_ks"
-                KEYSTORE_TYPE="PKCS12"
-                echo -e "${YELLOW}[WARN] keytool 타입 감지 실패. BKS -> PKCS12 변환 후 진행합니다.${NC}"
-                return 0
-            fi
-            echo -e "${RED}[ERROR] 고정 키스토어를 PKCS12로 변환하지 못했습니다.${NC}"
-            return 1
-        fi
-
         return 1
     }
 
-    # GitHub에서 고정 키스토어 다운로드 (반드시 이 키를 사용해야 함)
-download_keystore() {
-        # 기존 파일이 있으면 먼저 유효성 검사
-        if [ -f "$KEYSTORE_FILE" ]; then
-            echo -e "${BLUE}[INFO] 기존 키스토어 유효성 검증 중...${NC}"
-            if verify_keystore "$KEYSTORE_FILE"; then
-                local current_sha256
-                current_sha256=$(sha256sum "$KEYSTORE_FILE" 2>/dev/null | awk '{print toupper($1)}')
-                if [ -n "$current_sha256" ] && [ "$current_sha256" = "$EXPECTED_KEYSTORE_SHA256" ]; then
-                    echo -e "${GREEN}[OK] 기존 키스토어가 유효하며 해시도 일치합니다. 재사용합니다.${NC}"
-                    return 0
-                fi
-                echo -e "${YELLOW}[WARN] 기존 키스토어 해시가 고정값과 다릅니다. 다시 다운로드합니다.${NC}"
-            else
-                echo -e "${YELLOW}[WARN] 기존 키스토어가 손상되었습니다. 다시 다운로드합니다.${NC}"
-            fi
-            rm -f "$KEYSTORE_FILE"
-        fi
+    # patch5.sh처럼 GitHub 원본 keystore를 그대로 다운로드하고 바로 검증합니다.
+    download_keystore() {
+        echo -e "${YELLOW}[INFO] 고정 키스토어(my_kakao_key.keystore) 다운로드 중...${NC}"
+        rm -f "$KEYSTORE_FILE"
+        curl -L -f -o "$KEYSTORE_FILE" "$KEYSTORE_URL" >/dev/null 2>&1 || {
+            echo -e "${RED}[ERROR] 키스토어 다운로드 실패! 인터넷 연결이나 URL을 확인하세요.${NC}"
+            exit 1
+        }
 
-        # 여러 URL로 다운로드 시도
-        local URLS=("$KEYSTORE_URL_1" "$KEYSTORE_URL_2" "$KEYSTORE_URL_3")
-        local DOWNLOADED=0
-
-        for url in "${URLS[@]}"; do
-            echo -e "${YELLOW}[INFO] 키스토어 다운로드 시도: $(basename "$url")...${NC}"
-            rm -f "$KEYSTORE_FILE"
-            if curl -L -f --connect-timeout 15 --max-time 60 -o "$KEYSTORE_FILE" "$url" 2>/dev/null; then
-                # 다운로드 성공 - 파일 크기 확인
-                local FILESIZE=$(wc -c < "$KEYSTORE_FILE" 2>/dev/null || echo 0)
-                if [ "$FILESIZE" -lt 100 ]; then
-                    echo -e "${YELLOW}[WARN] 다운로드 파일이 너무 작습니다 (${FILESIZE}B). 다음 URL 시도...${NC}"
-                    rm -f "$KEYSTORE_FILE"
-                    continue
-                fi
-
-                local DOWNLOADED_SHA256
-                DOWNLOADED_SHA256=$(sha256sum "$KEYSTORE_FILE" 2>/dev/null | awk '{print toupper($1)}')
-                if [ -z "$DOWNLOADED_SHA256" ] || [ "$DOWNLOADED_SHA256" != "$EXPECTED_KEYSTORE_SHA256" ]; then
-                    echo -e "${YELLOW}[WARN] 키스토어 SHA-256 불일치. 다음 URL 시도...${NC}"
-                    echo -e "${YELLOW}[WARN] expected=${EXPECTED_KEYSTORE_SHA256}${NC}"
-                    echo -e "${YELLOW}[WARN] actual=${DOWNLOADED_SHA256:-N/A}${NC}"
-                    rm -f "$KEYSTORE_FILE"
-                    continue
-                fi
-
-                # keytool 유효성 검증 (또는 해시 고정값 기반 fallback)
-                if verify_keystore "$KEYSTORE_FILE"; then
-                    echo -e "${GREEN}[OK] 키스토어 다운로드/해시/검증 완료 (타입: ${KEYSTORE_TYPE:-auto})${NC}"
-                    DOWNLOADED=1
-                    break
-                else
-                    echo -e "${YELLOW}[WARN] 다운로드 파일이 유효한 키스토어가 아닙니다. 다음 URL 시도...${NC}"
-                    rm -f "$KEYSTORE_FILE"
-                fi
-            else
-                echo -e "${YELLOW}[WARN] 다운로드 실패. 다음 URL 시도...${NC}"
-                rm -f "$KEYSTORE_FILE"
-            fi
-        done
-
-        if [ $DOWNLOADED -eq 0 ]; then
-            echo -e "${RED}============================================${NC}"
-            echo -e "${RED}[ERROR] 고정 키스토어 다운로드에 실패했습니다!${NC}"
-            echo -e "${RED}이 스크립트는 반드시 GitHub의 고정 키스토어를 사용해야 합니다.${NC}"
-            echo -e "${RED}인터넷 연결 또는 GitHub 접속을 확인하세요.${NC}"
-            echo -e "${RED}URL: $KEYSTORE_URL_1${NC}"
-            echo -e "${RED}============================================${NC}"
+        if verify_keystore "$KEYSTORE_FILE"; then
+            echo -e "${GREEN}[OK] 키스토어 타입: ${KEYSTORE_TYPE}${NC}"
+        else
+            echo -e "${RED}[ERROR] 다운로드된 키스토어가 유효하지 않음${NC}"
             exit 1
         fi
     }
