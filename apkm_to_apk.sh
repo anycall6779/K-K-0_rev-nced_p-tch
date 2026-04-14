@@ -61,21 +61,23 @@ check_dependencies() {
                 URL="https://github.com/rendiix/termux-zipalign/releases/download/v1.0/zipalign_i686"
             fi
             
-            # 먼저 Termux bin 폴더에 설치 시도
-            wget -q --show-progress -O "$ZIPALIGN_BIN" "$URL" 2>/dev/null
-            if [ -f "$ZIPALIGN_BIN" ]; then
-                chmod +x "$ZIPALIGN_BIN"
+            # 다운로드 시도 (set -e 에 의해 스크립트가 멈추지 않도록 처리)
+            echo -e "${YELLOW}URL: $URL${NC}"
+            if wget -q --show-progress -O "$ZIPALIGN_BIN" "$URL"; then
+                chmod +x "$ZIPALIGN_BIN" || true
             else
-                # 권한 등의 문제로 실패한 경우 작업 폴더 내부에 설치
+                echo -e "${YELLOW}[INFO] 시스템 bin 디렉토리에 설치 실패. 로컬 디렉토리에 설치를 시도합니다.${NC}"
                 mkdir -p "$SCRIPT_DIR/bin"
                 ZIPALIGN_BIN="$SCRIPT_DIR/bin/zipalign"
-                wget -q --show-progress -O "$ZIPALIGN_BIN" "$URL" 2>/dev/null
-                chmod +x "$ZIPALIGN_BIN"
-                # PATH에 임시 추가
-                export PATH="$SCRIPT_DIR/bin:$PATH"
+                wget -q --show-progress -O "$ZIPALIGN_BIN" "$URL" || true
+                if [ -f "$ZIPALIGN_BIN" ]; then
+                    chmod +x "$ZIPALIGN_BIN" || true
+                    # PATH에 임시 추가
+                    export PATH="$SCRIPT_DIR/bin:$PATH"
+                fi
             fi
         else
-            pkg install -y $pkg || apt install -y $pkg
+            pkg install -y $pkg || apt install -y $pkg || true
         fi
         
         if ! command -v $cmd &> /dev/null; then
