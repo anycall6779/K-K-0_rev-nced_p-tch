@@ -42,14 +42,37 @@ check_dependencies() {
         echo -e "${YELLOW}[WARN] '$cmd' 명령어가 없습니다. 설치 시도 중...${NC}"
         
         if [ "$cmd" = "zipalign" ]; then
-            # zipalign은 기본 저장소에 없으므로 tur-repo 또는 rendiix 저장소 사용
-            pkg install -y tur-repo 2>/dev/null
-            pkg install -y zipalign 2>/dev/null
+            echo -e "${YELLOW}[INFO] 제공된 저장소에서 zipalign을 찾을 수 없어 직접 다운로드합니다...${NC}"
             
-            if ! command -v zipalign &> /dev/null; then
-                echo -e "${YELLOW}[INFO] 외부 저장소(rendiix)를 통해 zipalign 설치 시도...${NC}"
-                curl -s https://raw.githubusercontent.com/rendiix/rendiix.github.io/master/install-repo.sh | bash
-                pkg install -y zipalign
+            local BIN_DIR="$PREFIX/bin"
+            if [ -z "$PREFIX" ]; then
+                BIN_DIR="/data/data/com.termux/files/usr/bin"
+            fi
+            local ZIPALIGN_BIN="$BIN_DIR/zipalign"
+            
+            local ARCH=$(uname -m)
+            local URL="https://github.com/rendiix/termux-zipalign/releases/download/v1.0/zipalign_arm64-v8a"
+            
+            if [[ "$ARCH" == *"arm"* ]] && [[ "$ARCH" != "aarch64" ]]; then
+                URL="https://github.com/rendiix/termux-zipalign/releases/download/v1.0/zipalign_armeabi-v7a"
+            elif [[ "$ARCH" == "x86_64" ]]; then
+                URL="https://github.com/rendiix/termux-zipalign/releases/download/v1.0/zipalign_x86_64"
+            elif [[ "$ARCH" == "i686" ]]; then
+                URL="https://github.com/rendiix/termux-zipalign/releases/download/v1.0/zipalign_i686"
+            fi
+            
+            # 먼저 Termux bin 폴더에 설치 시도
+            wget -q --show-progress -O "$ZIPALIGN_BIN" "$URL" 2>/dev/null
+            if [ -f "$ZIPALIGN_BIN" ]; then
+                chmod +x "$ZIPALIGN_BIN"
+            else
+                # 권한 등의 문제로 실패한 경우 작업 폴더 내부에 설치
+                mkdir -p "$SCRIPT_DIR/bin"
+                ZIPALIGN_BIN="$SCRIPT_DIR/bin/zipalign"
+                wget -q --show-progress -O "$ZIPALIGN_BIN" "$URL" 2>/dev/null
+                chmod +x "$ZIPALIGN_BIN"
+                # PATH에 임시 추가
+                export PATH="$SCRIPT_DIR/bin:$PATH"
             fi
         else
             pkg install -y $pkg || apt install -y $pkg
