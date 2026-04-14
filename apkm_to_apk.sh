@@ -22,12 +22,13 @@ KEYSTORE_URL_1="https://raw.githubusercontent.com/anycall6779/K-K-0_rev-nced_p-t
 KEYSTORE_URL_2="https://github.com/anycall6779/K-K-0_rev-nced_p-tch/raw/refs/heads/main/my_kakao_key.keystore"
 KEYSTORE_URL_3="https://github.com/anycall6779/K-K-0_rev-nced_p-tch/raw/main/my_kakao_key.keystore"
 KEYSTORE_FILE="$SCRIPT_DIR/my_kakao_key.keystore"
-KEYSTORE_ALIAS="revanced"
+# alias를 강제하지 않고 keystore의 기본(유일) 엔트리를 사용합니다.
+# 기존 "revanced" 강제 지정은 다른 엔트리를 집어 업데이트 실패를 유발할 수 있습니다.
+KEYSTORE_ALIAS=""
 KEYSTORE_PASS="android"
 KEYSTORE_TYPE=""  # 자동 감지 (JKS 또는 PKCS12)
-# patch5.sh에서 사용하던 로컬 키스토어를 우선 재사용해 서명 불일치 가능성을 줄입니다.
-FALLBACK_KEYSTORE_1="$HOME/revanced-build-script-ample/my_kakao_key.keystore"
-FALLBACK_KEYSTORE_2="$HOME/revanced-build-script/my_kakao_key.keystore"
+# 고정 keystore 무결성 체크(현재 저장소의 my_kakao_key.keystore와 동일 해시)
+EXPECTED_KEYSTORE_SHA256="AA5AF5D37D84AA6B617C242FBAF3339F5A96F43C28F8604B9C20D4E9CFC3CDD9"
 
 extract_apk_sha256() {
     local apk_path="$1"
@@ -110,32 +111,23 @@ check_dependencies() {
     }
 
     # GitHub에서 고정 키스토어 다운로드 (반드시 이 키를 사용해야 함)
-    download_keystore() {
+download_keystore() {
         # 기존 파일이 있으면 먼저 유효성 검사
         if [ -f "$KEYSTORE_FILE" ]; then
             echo -e "${BLUE}[INFO] 기존 키스토어 유효성 검증 중...${NC}"
             if verify_keystore "$KEYSTORE_FILE"; then
-                echo -e "${GREEN}[OK] 기존 키스토어가 유효합니다 (타입: ${KEYSTORE_TYPE}). 재사용합니다.${NC}"
-                return 0
+                local current_sha256
+                current_sha256=$(sha256sum "$KEYSTORE_FILE" 2>/dev/null | awk '{print toupper($1)}')
+                if [ -n "$current_sha256" ] && [ "$current_sha256" = "$EXPECTED_KEYSTORE_SHA256" ]; then
+                    echo -e "${GREEN}[OK] 기존 키스토어가 유효하며 해시도 일치합니다. 재사용합니다.${NC}"
+                    return 0
+                fi
+                echo -e "${YELLOW}[WARN] 기존 키스토어 해시가 고정값과 다릅니다. 다시 다운로드합니다.${NC}"
             else
                 echo -e "${YELLOW}[WARN] 기존 키스토어가 손상되었습니다. 다시 다운로드합니다.${NC}"
-                rm -f "$KEYSTORE_FILE"
             fi
+            rm -f "$KEYSTORE_FILE"
         fi
-
-        # patch5.sh에서 이미 사용 중인 키스토어가 있으면 우선 재사용
-        for local_ks in "$FALLBACK_KEYSTORE_1" "$FALLBACK_KEYSTORE_2"; do
-            if [ -f "$local_ks" ]; then
-                echo -e "${BLUE}[INFO] 기존 패치 스크립트 키스토어 확인 중: $local_ks${NC}"
-                if verify_keystore "$local_ks"; then
-                    cp -f "$local_ks" "$KEYSTORE_FILE"
-                    echo -e "${GREEN}[OK] patch5 계열 키스토어를 재사용합니다 (타입: ${KEYSTORE_TYPE}).${NC}"
-                    return 0
-                else
-                    echo -e "${YELLOW}[WARN] 로컬 키스토어가 유효하지 않습니다. 다음 후보를 확인합니다.${NC}"
-                fi
-            fi
-        done
 
         # 여러 URL로 다운로드 시도
         local URLS=("$KEYSTORE_URL_1" "$KEYSTORE_URL_2" "$KEYSTORE_URL_3")
@@ -153,9 +145,19 @@ check_dependencies() {
                     continue
                 fi
 
+                local DOWNLOADED_SHA256
+                DOWNLOADED_SHA256=$(sha256sum "$KEYSTORE_FILE" 2>/dev/null | awk '{print toupper($1)}')
+                if [ -z "$DOWNLOADED_SHA256" ] || [ "$DOWNLOADED_SHA256" != "$EXPECTED_KEYSTORE_SHA256" ]; then
+                    echo -e "${YELLOW}[WARN] 키스토어 SHA-256 불일치. 다음 URL 시도...${NC}"
+                    echo -e "${YELLOW}[WARN] expected=${EXPECTED_KEYSTORE_SHA256}${NC}"
+                    echo -e "${YELLOW}[WARN] actual=${DOWNLOADED_SHA256:-N/A}${NC}"
+                    rm -f "$KEYSTORE_FILE"
+                    continue
+                fi
+
                 # keytool로 유효성 검증 (타입 자동 감지)
                 if verify_keystore "$KEYSTORE_FILE"; then
-                    echo -e "${GREEN}[OK] 키스토어 다운로드 및 검증 완료 (타입: ${KEYSTORE_TYPE})${NC}"
+                    echo -e "${GREEN}[OK] 키스토어 다운로드/해시/유효성 검증 완료 (타입: ${KEYSTORE_TYPE})${NC}"
                     DOWNLOADED=1
                     break
                 else
@@ -268,10 +270,13 @@ merge_and_sign() {
     rm -f "$FINAL_APK"
     local SIGN_CMD=(apksigner sign
         --ks "$KEYSTORE_FILE"
-        --ks-key-alias "$KEYSTORE_ALIAS"
         --ks-pass "pass:$KEYSTORE_PASS"
         --key-pass "pass:$KEYSTORE_PASS"
     )
+
+    if [ -n "$KEYSTORE_ALIAS" ]; then
+        SIGN_CMD+=(--ks-key-alias "$KEYSTORE_ALIAS")
+    fi
 
     # 감지된 키스토어 타입이 있으면 명시적으로 전달 (JKS/PKCS12 혼동 방지)
     if [ -n "$KEYSTORE_TYPE" ]; then
