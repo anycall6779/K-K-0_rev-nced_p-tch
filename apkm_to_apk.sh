@@ -25,6 +25,14 @@ KEYSTORE_FILE="$SCRIPT_DIR/my_kakao_key.keystore"
 KEYSTORE_ALIAS="revanced"
 KEYSTORE_PASS="android"
 KEYSTORE_TYPE=""  # 자동 감지 (JKS 또는 PKCS12)
+# patch5.sh에서 사용하던 로컬 키스토어를 우선 재사용해 서명 불일치 가능성을 줄입니다.
+FALLBACK_KEYSTORE_1="$HOME/revanced-build-script-ample/my_kakao_key.keystore"
+FALLBACK_KEYSTORE_2="$HOME/revanced-build-script/my_kakao_key.keystore"
+
+extract_apk_sha256() {
+    local apk_path="$1"
+    apksigner verify --print-certs "$apk_path" 2>/dev/null | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n1
+}
 
 check_dependencies() {
     clear
@@ -114,6 +122,20 @@ check_dependencies() {
                 rm -f "$KEYSTORE_FILE"
             fi
         fi
+
+        # patch5.sh에서 이미 사용 중인 키스토어가 있으면 우선 재사용
+        for local_ks in "$FALLBACK_KEYSTORE_1" "$FALLBACK_KEYSTORE_2"; do
+            if [ -f "$local_ks" ]; then
+                echo -e "${BLUE}[INFO] 기존 패치 스크립트 키스토어 확인 중: $local_ks${NC}"
+                if verify_keystore "$local_ks"; then
+                    cp -f "$local_ks" "$KEYSTORE_FILE"
+                    echo -e "${GREEN}[OK] patch5 계열 키스토어를 재사용합니다 (타입: ${KEYSTORE_TYPE}).${NC}"
+                    return 0
+                else
+                    echo -e "${YELLOW}[WARN] 로컬 키스토어가 유효하지 않습니다. 다음 후보를 확인합니다.${NC}"
+                fi
+            fi
+        done
 
         # 여러 URL로 다운로드 시도
         local URLS=("$KEYSTORE_URL_1" "$KEYSTORE_URL_2" "$KEYSTORE_URL_3")
@@ -261,8 +283,18 @@ merge_and_sign() {
     "${SIGN_CMD[@]}"
 
     if [ -f "$FINAL_APK" ]; then
+        if ! apksigner verify "$FINAL_APK" >/dev/null 2>&1; then
+            echo -e "${RED}[ERROR] 서명 검증 실패! (생성된 APK가 손상되었거나 서명이 올바르지 않음)${NC}"
+            exit 1
+        fi
+
+        local apk_cert_sha256=$(extract_apk_sha256 "$FINAL_APK")
         echo -e "\n${GREEN}[============= 성공! =============]${NC}"
         echo -e "${GREEN}저장 완료: $FINAL_APK${NC}"
+        if [ -n "$apk_cert_sha256" ]; then
+            echo -e "${BLUE}[INFO] 최종 APK 서명 SHA-256: ${apk_cert_sha256}${NC}"
+        fi
+        echo -e "${YELLOW}[안내] 기존 설치본과 서명 SHA-256이 같아야 '업데이트' 설치가 됩니다.${NC}"
     else
         echo -e "${RED}[ERROR] 서명 실패!${NC}"
     fi
