@@ -1,12 +1,10 @@
 #!/bin/bash
 #
-# APKM to APK Merger & Signer
-# APKM 파일을 병합하고 지정된 keystore로 서명하여 순정 APK로 만듭니다.
+# patch5.sh 기반: APKM 병합 후 "패치 없이" 동일 keystore로 서명만 수행
+# Termux 전용
 #
-
 set -e
 
-# Color Codes
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -14,295 +12,146 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 BASE_DIR="/storage/emulated/0/Download"
-SCRIPT_DIR="$HOME/apkm_to_apk"
+WORK_DIR="$HOME/patch5-nopatch"
 EDITOR_JAR="$BASE_DIR/APKEditor-1.4.5.jar"
 
-# Keystore 설정 (patch5.sh 방식 그대로)
 KEYSTORE_URL="https://raw.githubusercontent.com/anycall6779/K-K-0_rev-nced_p-tch/main/my_kakao_key.keystore"
-KEYSTORE_FILE="$SCRIPT_DIR/my_kakao_key.keystore"
-KEYSTORE_ALIAS=""
+KEYSTORE_FILE="$WORK_DIR/my_kakao_key.keystore"
 KEYSTORE_PASS="android"
-KEYSTORE_TYPE=""  # PKCS12 또는 JKS 감지
-BCPROV_JAR="$SCRIPT_DIR/bcprov-jdk18on-1.78.1.jar"
+KEYSTORE_TYPE=""
+BCPROV_JAR="$WORK_DIR/bcprov-jdk18on-1.78.1.jar"
 BCPROV_URL="https://repo1.maven.org/maven2/org/bouncycastle/bcprov-jdk18on/1.78.1/bcprov-jdk18on-1.78.1.jar"
 
-extract_apk_sha256() {
-    local apk_path="$1"
-    apksigner verify --print-certs "$apk_path" 2>/dev/null | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n1
+install_pkg() {
+    local cmd="$1"
+    local pkg="$1"
+    [ "$cmd" = "java" ] && pkg="openjdk-17"
+    pkg install -y "$pkg" >/dev/null 2>&1 || apt install -y "$pkg" >/dev/null 2>&1 || true
 }
 
 check_dependencies() {
-    clear
-    echo -e "${BLUE}=======================================${NC}"
-    echo -e "${GREEN}       APKM to APK 병합 및 서명기       ${NC}"
-    echo -e "${BLUE}=======================================${NC}"
-    echo -e "${BLUE}[INFO] 필요 도구 확인 중...${NC}"
-    
-    local MISSING=0
-    
-    install_pkg() {
-        local cmd=$1
-        local pkg=$1
-        
-        # 명령어와 패키지 이름이 다른 경우 매핑
-        if [ "$cmd" = "java" ]; then pkg="openjdk-17"; fi
-        
-        echo -e "${YELLOW}[WARN] '$cmd' 명령어가 없습니다. 설치 시도 중...${NC}"
-        pkg install -y $pkg || apt install -y $pkg || true
-        
-        if ! command -v $cmd &> /dev/null; then
-            MISSING=1
-        fi
-    }
-
+    echo -e "${BLUE}[INFO] 필수 도구 확인 중...${NC}"
+    local missing=0
     for cmd in unzip java curl zipalign apksigner keytool; do
-        if ! command -v $cmd &> /dev/null; then
-            install_pkg $cmd
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            install_pkg "$cmd"
+            command -v "$cmd" >/dev/null 2>&1 || missing=1
         fi
     done
-
-    # Termux에서 zipalign/apksigner에 실행 권한이 없는 버그 수정
-    for bin in zipalign apksigner; do
-        local bin_path=$(command -v $bin 2>/dev/null || true)
-        if [ -n "$bin_path" ] && [ ! -x "$bin_path" ]; then
-            echo -e "${YELLOW}[FIX] '$bin' 실행 권한 부여 중...${NC}"
-            chmod +x "$bin_path" 2>/dev/null || true
-        fi
-    done
-    
-    if [ $MISSING -eq 1 ]; then
-        echo -e "${RED}[ERROR] 일부 도구를 자동 설치할 수 없습니다.${NC}"
-        echo -e "${RED}수동으로 설치를 확인해주세요: pkg install unzip openjdk-17 curl apksigner${NC}"
-        exit 1
-    fi
-    
-    mkdir -p "$SCRIPT_DIR"
-    
-    if [ ! -f "$EDITOR_JAR" ]; then
-        echo -e "${YELLOW}[INFO] 병합 툴(APKEditor) 다운로드 중...${NC}"
-        curl -L -o "$EDITOR_JAR" "https://github.com/REAndroid/APKEditor/releases/download/V1.4.5/APKEditor-1.4.5.jar" || exit 1
-    fi
-
-    ensure_bcprov() {
-        if [ -f "$BCPROV_JAR" ] && [ -s "$BCPROV_JAR" ]; then
-            return 0
-        fi
-        echo -e "${YELLOW}[INFO] Bouncy Castle provider 다운로드 중...${NC}"
-        curl -L -f --connect-timeout 15 --max-time 60 -o "$BCPROV_JAR" "$BCPROV_URL" >/dev/null 2>&1 || return 1
-        [ -s "$BCPROV_JAR" ] || return 1
-        return 0
-    }
-
-    # patch5.sh keystore를 원본 그대로 내려받고, 필요할 때만 임시 PKCS12로 변환합니다.
-    verify_keystore() {
-        local ks_path="$1"
-        [ ! -f "$ks_path" ] && return 1
-
-        if keytool -list -keystore "$ks_path" -storepass "$KEYSTORE_PASS" -storetype PKCS12 >/dev/null 2>&1; then
-            KEYSTORE_TYPE="PKCS12"
-            return 0
-        fi
-        if keytool -list -keystore "$ks_path" -storepass "$KEYSTORE_PASS" -storetype JKS >/dev/null 2>&1; then
-            KEYSTORE_TYPE="JKS"
-            return 0
-        fi
-
-        # 일부 환경에서는 BKS provider가 없어 직접 로드가 실패합니다.
-        if ! ensure_bcprov; then
-            echo -e "${RED}[ERROR] Bouncy Castle provider 다운로드 실패로 keystore 검증을 진행할 수 없습니다.${NC}"
-            return 1
-        fi
-
-        # BKS로 로드 가능한지 먼저 확인
-        if ! keytool -list \
-            -providerclass org.bouncycastle.jce.provider.BouncyCastleProvider \
-            -providerpath "$BCPROV_JAR" \
-            -keystore "$ks_path" \
-            -storetype BKS \
-            -storepass "$KEYSTORE_PASS" >/dev/null 2>&1; then
-            echo -e "${RED}[ERROR] keystore를 PKCS12/JKS/BKS로 읽지 못했습니다.${NC}"
-            return 1
-        fi
-
-        # BKS는 apksigner 호환을 위해 임시 PKCS12로 변환해서 사용
-        local converted_ks="$SCRIPT_DIR/my_kakao_key.temp.p12"
-        if keytool -importkeystore -noprompt \
-            -providerclass org.bouncycastle.jce.provider.BouncyCastleProvider \
-            -providerpath "$BCPROV_JAR" \
-            -srckeystore "$ks_path" \
-            -srcstoretype BKS \
-            -srcstorepass "$KEYSTORE_PASS" \
-            -destkeystore "$converted_ks" \
-            -deststoretype PKCS12 \
-            -deststorepass "$KEYSTORE_PASS" \
-            -destkeypass "$KEYSTORE_PASS" >/dev/null 2>&1; then
-            KEYSTORE_FILE="$converted_ks"
-            KEYSTORE_TYPE="PKCS12"
-            echo -e "${YELLOW}[WARN] 원본 keystore는 유지하고, 임시 PKCS12로 변환해 서명합니다.${NC}"
-            return 0
-        fi
-        echo -e "${RED}[ERROR] BKS -> PKCS12 변환 실패${NC}"
-        return 1
-    }
-
-    # patch5.sh처럼 GitHub 원본 keystore를 그대로 다운로드하고 바로 검증합니다.
-    download_keystore() {
-        echo -e "${YELLOW}[INFO] 고정 키스토어(my_kakao_key.keystore) 다운로드 중...${NC}"
-        rm -f "$KEYSTORE_FILE"
-        curl -L -f -A "Mozilla/5.0 (Android; Termux)" -o "$KEYSTORE_FILE" "$KEYSTORE_URL" >/dev/null 2>&1 || {
-            echo -e "${RED}[ERROR] 키스토어 다운로드 실패! 인터넷 연결이나 URL을 확인하세요.${NC}"
-            exit 1
-        }
-
-        if [ ! -s "$KEYSTORE_FILE" ]; then
-            echo -e "${RED}[ERROR] 키스토어 파일이 비어 있습니다.${NC}"
-            exit 1
-        fi
-        if head -c 256 "$KEYSTORE_FILE" 2>/dev/null | grep -qiE "<!doctype html|<html|github"; then
-            echo -e "${RED}[ERROR] 키스토어 대신 HTML 페이지가 다운로드되었습니다. 네트워크/URL 상태를 확인하세요.${NC}"
-            exit 1
-        fi
-
-        if verify_keystore "$KEYSTORE_FILE"; then
-            echo -e "${GREEN}[OK] 키스토어 타입: ${KEYSTORE_TYPE}${NC}"
-        else
-            echo -e "${RED}[ERROR] 다운로드된 키스토어가 유효하지 않음${NC}"
-            exit 1
-        fi
-    }
-    download_keystore
+    [ "$missing" -eq 1 ] && { echo -e "${RED}[ERROR] 필수 도구 설치 실패${NC}"; exit 1; }
+    mkdir -p "$WORK_DIR"
+    [ -f "$EDITOR_JAR" ] || curl -L -o "$EDITOR_JAR" "https://github.com/REAndroid/APKEditor/releases/download/V1.4.5/APKEditor-1.4.5.jar"
 }
 
-get_apkm_file() {
-    echo ""
-    echo -e "${GREEN}변환할 APKM 파일을 선택하세요 (Download 폴더 기준)${NC}"
-    
-    local APKM_FILES=()
-    while IFS= read -r -d '' file; do
-        APKM_FILES+=("$(basename "$file")")
-    done < <(find "$BASE_DIR" -maxdepth 1 -name "*.apkm" -print0 2>/dev/null)
-    
-    if [ ${#APKM_FILES[@]} -gt 0 ]; then
-        for i in "${!APKM_FILES[@]}"; do
-            echo -e "  ${GREEN}$((i+1)).${NC} ${APKM_FILES[$i]}"
-        done
-        echo ""
-        read -r -p "> 번호 입력 (혹은 0을 눌러 직접 입력): " selection
-        
-        if [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -ge 1 ] && [ "$selection" -le ${#APKM_FILES[@]} ]; then
-            APKM_FILE="$BASE_DIR/${APKM_FILES[$((selection-1))]}"
-            echo -e "${GREEN}[선택됨] ${APKM_FILES[$((selection-1))]}${NC}"
-            return 0
-        fi
-    fi
-    
-    echo -e "\n${YELLOW}APKM 파일의 전체 경로를 입력해주세요:${NC}"
-    read -r -p "> 경로: " APKM_FILE
-    if [ ! -f "$APKM_FILE" ]; then
-        echo -e "${RED}[ERROR] 파일이 존재하지 않습니다: $APKM_FILE${NC}"
+ensure_bcprov() {
+    [ -s "$BCPROV_JAR" ] && return 0
+    curl -L -f --connect-timeout 15 --max-time 60 -o "$BCPROV_JAR" "$BCPROV_URL" >/dev/null 2>&1
+}
+
+download_keystore() {
+    echo -e "${YELLOW}[INFO] 고정 키스토어 다운로드 중...${NC}"
+    rm -f "$KEYSTORE_FILE"
+    curl -L -f -A "Mozilla/5.0 (Android; Termux)" -o "$KEYSTORE_FILE" "$KEYSTORE_URL" >/dev/null 2>&1 || {
+        echo -e "${RED}[ERROR] 키스토어 다운로드 실패${NC}"
         exit 1
+    }
+}
+
+prepare_signing_keystore() {
+    if keytool -list -keystore "$KEYSTORE_FILE" -storepass "$KEYSTORE_PASS" -storetype PKCS12 >/dev/null 2>&1; then
+        KEYSTORE_TYPE="PKCS12"
+        return 0
     fi
+    if keytool -list -keystore "$KEYSTORE_FILE" -storepass "$KEYSTORE_PASS" -storetype JKS >/dev/null 2>&1; then
+        KEYSTORE_TYPE="JKS"
+        return 0
+    fi
+
+    ensure_bcprov || { echo -e "${RED}[ERROR] bcprov 다운로드 실패${NC}"; exit 1; }
+    local converted="$WORK_DIR/my_kakao_key.temp.p12"
+    keytool -importkeystore -noprompt \
+        -providerclass org.bouncycastle.jce.provider.BouncyCastleProvider \
+        -providerpath "$BCPROV_JAR" \
+        -srckeystore "$KEYSTORE_FILE" \
+        -srcstoretype BKS \
+        -srcstorepass "$KEYSTORE_PASS" \
+        -destkeystore "$converted" \
+        -deststoretype PKCS12 \
+        -deststorepass "$KEYSTORE_PASS" \
+        -destkeypass "$KEYSTORE_PASS" >/dev/null 2>&1 || {
+        echo -e "${RED}[ERROR] keystore 변환 실패${NC}"
+        exit 1
+    }
+    KEYSTORE_FILE="$converted"
+    KEYSTORE_TYPE="PKCS12"
+}
+
+pick_apkm() {
+    local files=()
+    while IFS= read -r -d '' file; do
+        files+=("$(basename "$file")")
+    done < <(find "$BASE_DIR" -maxdepth 1 -name "*.apkm" -print0 2>/dev/null)
+
+    echo -e "${GREEN}변환할 APKM 파일 선택${NC}"
+    for i in "${!files[@]}"; do
+        echo -e "  ${GREEN}$((i+1)).${NC} ${files[$i]}"
+    done
+    read -r -p "> 번호 입력 (0=직접 경로): " selection
+    if [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -ge 1 ] && [ "$selection" -le ${#files[@]} ]; then
+        APKM_FILE="$BASE_DIR/${files[$((selection-1))]}"
+    else
+        read -r -p "> APKM 전체 경로: " APKM_FILE
+    fi
+    [ -f "$APKM_FILE" ] || { echo -e "${RED}[ERROR] APKM 파일 없음${NC}"; exit 1; }
 }
 
 merge_and_sign() {
-    local TEMP_DIR="$SCRIPT_DIR/temp_merge"
-    local MERGED_APK="$SCRIPT_DIR/merged_unsigned.apk"
-    local ALIGNED_APK="$SCRIPT_DIR/merged_aligned.apk"
-    
-    # 결과물은 원본 파일명에서 .apkm을 제거하고 _Signed_APK.apk를 붙입니다.
-    local FILE_BASE_NAME=$(basename "$APKM_FILE" .apkm)
-    local FINAL_APK="$BASE_DIR/${FILE_BASE_NAME}_Signed.apk"
+    local temp_dir="$WORK_DIR/temp_merge"
+    local merged="$WORK_DIR/merged_unsigned.apk"
+    local aligned="$WORK_DIR/merged_aligned.apk"
+    local base_name
+    base_name="$(basename "$APKM_FILE" .apkm)"
+    local final_apk="$BASE_DIR/${base_name}_NoPatch_Signed.apk"
 
-    rm -rf "$TEMP_DIR" && mkdir -p "$TEMP_DIR"
-    
-    echo -e "\n${BLUE}[1/4] APKM 압축 해제 중...${NC}"
-    unzip -qqo "$APKM_FILE" -d "$TEMP_DIR" 2>/dev/null
-    
-    if [ ! -f "$TEMP_DIR/base.apk" ]; then
-        echo -e "${RED}[ERROR] 압축 해제 패일에 base.apk가 존재하지 않습니다 (올바른 APKM 파일이 아님).${NC}"
-        exit 1
-    fi
-    
-    echo -e "${BLUE}[2/4] APKEditor를 통한 파일 병합 중...${NC}"
-    rm -f "$MERGED_APK"
-    java -jar "$EDITOR_JAR" m -i "$TEMP_DIR" -o "$MERGED_APK" >/dev/null 2>&1
-    
-    if [ ! -f "$MERGED_APK" ]; then
-        echo -e "${RED}[ERROR] 파일 병합 실패!${NC}"
-        exit 1
-    fi
-    
-    echo -e "${BLUE}[3/4] Zipalign 파일 최적화 중...${NC}"
-    rm -f "$ALIGNED_APK"
-    if command -v zipalign &> /dev/null; then
-        zipalign -p -f 4 "$MERGED_APK" "$ALIGNED_APK" || true
-        if [ -f "$ALIGNED_APK" ]; then
-            mv "$ALIGNED_APK" "$MERGED_APK"
-            echo -e "${GREEN}[OK] Zipalign 최적화 완료${NC}"
-        else
-            echo -e "${YELLOW}[WARN] Zipalign 실패, 최적화 없이 계속 진행합니다.${NC}"
-        fi
-    else
-        echo -e "${YELLOW}[WARN] zipalign을 찾을 수 없어 최적화를 건너뜁니다.${NC}"
+    rm -rf "$temp_dir" && mkdir -p "$temp_dir"
+    unzip -qqo "$APKM_FILE" -d "$temp_dir"
+    [ -f "$temp_dir/base.apk" ] || { echo -e "${RED}[ERROR] base.apk 없음${NC}"; exit 1; }
+
+    java -jar "$EDITOR_JAR" m -i "$temp_dir" -o "$merged" >/dev/null 2>&1
+    [ -f "$merged" ] || { echo -e "${RED}[ERROR] 병합 실패${NC}"; exit 1; }
+
+    if command -v zipalign >/dev/null 2>&1; then
+        zipalign -p -f 4 "$merged" "$aligned" >/dev/null 2>&1 || true
+        [ -f "$aligned" ] && mv -f "$aligned" "$merged"
     fi
 
-    echo -e "${BLUE}[4/4] apksigner를 이용해 키스토어로 서명 중...${NC}"
+    apksigner sign \
+        --ks "$KEYSTORE_FILE" \
+        --ks-pass "pass:$KEYSTORE_PASS" \
+        --key-pass "pass:$KEYSTORE_PASS" \
+        --ks-type "$KEYSTORE_TYPE" \
+        --out "$final_apk" "$merged"
 
-    # 키스토어 파일 유효성 최종 확인
-    if [ ! -f "$KEYSTORE_FILE" ]; then
-        echo -e "${RED}[ERROR] 키스토어 파일이 존재하지 않습니다: $KEYSTORE_FILE${NC}"
-        exit 1
-    fi
-    local KS_SIZE=$(wc -c < "$KEYSTORE_FILE" 2>/dev/null || echo 0)
-    echo -e "${BLUE}[DEBUG] 키스토어: ${KEYSTORE_FILE}${NC}"
-    echo -e "${BLUE}[DEBUG] 키스토어 크기: ${KS_SIZE}B / 타입: ${KEYSTORE_TYPE:-자동}${NC}"
+    apksigner verify "$final_apk" >/dev/null 2>&1 || { echo -e "${RED}[ERROR] 서명 검증 실패${NC}"; exit 1; }
+    local cert_sha256
+    cert_sha256="$(apksigner verify --print-certs "$final_apk" 2>/dev/null | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n1)"
+    echo -e "${GREEN}[SUCCESS] 저장 완료: $final_apk${NC}"
+    [ -n "$cert_sha256" ] && echo -e "${BLUE}[INFO] 서명 SHA-256: $cert_sha256${NC}"
 
-    # apksigner 서명 명령 구성
-    rm -f "$FINAL_APK"
-    local SIGN_CMD=(apksigner sign
-        --ks "$KEYSTORE_FILE"
-        --ks-pass "pass:$KEYSTORE_PASS"
-        --key-pass "pass:$KEYSTORE_PASS"
-    )
-
-    if [ -n "$KEYSTORE_ALIAS" ]; then
-        SIGN_CMD+=(--ks-key-alias "$KEYSTORE_ALIAS")
-    fi
-
-    # 감지된 키스토어 타입이 있으면 명시적으로 전달 (JKS/PKCS12 혼동 방지)
-    if [ -n "$KEYSTORE_TYPE" ]; then
-        SIGN_CMD+=(--ks-type "$KEYSTORE_TYPE")
-    fi
-
-    SIGN_CMD+=(--out "$FINAL_APK" "$MERGED_APK")
-
-    "${SIGN_CMD[@]}"
-
-    if [ -f "$FINAL_APK" ]; then
-        if ! apksigner verify "$FINAL_APK" >/dev/null 2>&1; then
-            echo -e "${RED}[ERROR] 서명 검증 실패! (생성된 APK가 손상되었거나 서명이 올바르지 않음)${NC}"
-            exit 1
-        fi
-
-        local apk_cert_sha256=$(extract_apk_sha256 "$FINAL_APK")
-        echo -e "\n${GREEN}[============= 성공! =============]${NC}"
-        echo -e "${GREEN}저장 완료: $FINAL_APK${NC}"
-        if [ -n "$apk_cert_sha256" ]; then
-            echo -e "${BLUE}[INFO] 최종 APK 서명 SHA-256: ${apk_cert_sha256}${NC}"
-        fi
-        echo -e "${YELLOW}[안내] 기존 설치본과 서명 SHA-256이 같아야 '업데이트' 설치가 됩니다.${NC}"
-    else
-        echo -e "${RED}[ERROR] 서명 실패!${NC}"
-    fi
-
-    echo -e "${YELLOW}임시 파일 정리 중...${NC}"
-    rm -rf "$TEMP_DIR" "$MERGED_APK" "$ALIGNED_APK" "$SCRIPT_DIR/my_kakao_key.temp.p12"
+    rm -rf "$temp_dir" "$merged" "$aligned" "$WORK_DIR/my_kakao_key.temp.p12"
 }
 
 main() {
+    clear
+    echo -e "${GREEN}======================================${NC}"
+    echo -e "${GREEN}  APKM 병합 + 무패치 서명 (patch5 키)${NC}"
+    echo -e "${GREEN}======================================${NC}"
     check_dependencies
-    get_apkm_file
+    download_keystore
+    prepare_signing_keystore
+    pick_apkm
     merge_and_sign
 }
 
 main
+
