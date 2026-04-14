@@ -47,9 +47,18 @@ check_dependencies() {
         fi
     }
 
-    for cmd in unzip java wget apksigner; do
+    for cmd in unzip java wget zipalign apksigner; do
         if ! command -v $cmd &> /dev/null; then
             install_pkg $cmd
+        fi
+    done
+
+    # Termux에서 zipalign/apksigner에 실행 권한이 없는 버그 수정
+    for bin in zipalign apksigner; do
+        local bin_path=$(command -v $bin 2>/dev/null || true)
+        if [ -n "$bin_path" ] && [ ! -x "$bin_path" ]; then
+            echo -e "${YELLOW}[FIX] '$bin' 실행 권한 부여 중...${NC}"
+            chmod +x "$bin_path" 2>/dev/null || true
         fi
     done
     
@@ -131,9 +140,21 @@ merge_and_sign() {
         exit 1
     fi
     
-    echo -e "${YELLOW}[INFO] Zipalign 최적화는 패스합니다.${NC}"
-    
-    echo -e "${BLUE}[3/3] apksigner를 이용해 키스토어로 서명 중...${NC}"
+    echo -e "${BLUE}[3/4] Zipalign 파일 최적화 중...${NC}"
+    rm -f "$ALIGNED_APK"
+    if command -v zipalign &> /dev/null; then
+        zipalign -p -f 4 "$MERGED_APK" "$ALIGNED_APK"
+        if [ -f "$ALIGNED_APK" ]; then
+            mv "$ALIGNED_APK" "$MERGED_APK"
+            echo -e "${GREEN}[OK] Zipalign 최적화 완료${NC}"
+        else
+            echo -e "${YELLOW}[WARN] Zipalign 실패, 최적화 없이 계속 진행합니다.${NC}"
+        fi
+    else
+        echo -e "${YELLOW}[WARN] zipalign을 찾을 수 없어 최적화를 건너뜁니다.${NC}"
+    fi
+
+    echo -e "${BLUE}[4/4] apksigner를 이용해 키스토어로 서명 중...${NC}"
     rm -f "$FINAL_APK"
     apksigner sign --ks "$KEYSTORE_FILE" \
         --ks-key-alias "$KEYSTORE_ALIAS" \
@@ -149,7 +170,7 @@ merge_and_sign() {
     fi
 
     echo -e "${YELLOW}임시 파일 정리 중...${NC}"
-    rm -rf "$TEMP_DIR" "$MERGED_APK"
+    rm -rf "$TEMP_DIR" "$MERGED_APK" "$ALIGNED_APK"
 }
 
 main() {
