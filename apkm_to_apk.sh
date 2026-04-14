@@ -18,10 +18,13 @@ SCRIPT_DIR="$HOME/apkm_to_apk"
 EDITOR_JAR="$BASE_DIR/APKEditor-1.4.5.jar"
 
 # Keystore 설정
-KEYSTORE_URL="https://github.com/anycall6779/K-K-0_rev-nced_p-tch/raw/refs/heads/main/my_kakao_key.keystore"
+KEYSTORE_URL_1="https://raw.githubusercontent.com/anycall6779/K-K-0_rev-nced_p-tch/main/my_kakao_key.keystore"
+KEYSTORE_URL_2="https://github.com/anycall6779/K-K-0_rev-nced_p-tch/raw/refs/heads/main/my_kakao_key.keystore"
+KEYSTORE_URL_3="https://github.com/anycall6779/K-K-0_rev-nced_p-tch/raw/main/my_kakao_key.keystore"
 KEYSTORE_FILE="$SCRIPT_DIR/my_kakao_key.keystore"
 KEYSTORE_ALIAS="revanced"
 KEYSTORE_PASS="android"
+KEYSTORE_TYPE=""  # 자동 감지 (JKS 또는 PKCS12)
 
 check_dependencies() {
     clear
@@ -75,75 +78,85 @@ check_dependencies() {
         curl -L -o "$EDITOR_JAR" "https://github.com/REAndroid/APKEditor/releases/download/V1.4.5/APKEditor-1.4.5.jar" || exit 1
     fi
 
-    # 키스토어 다운로드 또는 로컬 생성
-    download_or_create_keystore() {
-        # 키스토어 유효성 검증 함수 (keytool로 실제 파싱 가능한지 확인)
-        verify_keystore() {
-            local ks_path="$1"
-            [ ! -f "$ks_path" ] && return 1
-            # keytool -list로 키스토어를 실제 로드해본다
-            keytool -list \
-                -keystore "$ks_path" \
-                -storepass "$KEYSTORE_PASS" \
-                -storetype PKCS12 >/dev/null 2>&1
-            return $?
-        }
+    # 키스토어 유효성 검증 함수 (keytool로 실제 파싱 가능한지 확인, 타입 자동 감지)
+    verify_keystore() {
+        local ks_path="$1"
+        [ ! -f "$ks_path" ] && return 1
 
+        # PKCS12로 시도
+        if keytool -list -keystore "$ks_path" -storepass "$KEYSTORE_PASS" -storetype PKCS12 >/dev/null 2>&1; then
+            KEYSTORE_TYPE="PKCS12"
+            return 0
+        fi
+        # JKS로 시도
+        if keytool -list -keystore "$ks_path" -storepass "$KEYSTORE_PASS" -storetype JKS >/dev/null 2>&1; then
+            KEYSTORE_TYPE="JKS"
+            return 0
+        fi
+        # BKS로 시도 (Bouncy Castle, Termux 환경에서 가끔 사용)
+        if keytool -list -keystore "$ks_path" -storepass "$KEYSTORE_PASS" -storetype BKS >/dev/null 2>&1; then
+            KEYSTORE_TYPE="BKS"
+            return 0
+        fi
+        return 1
+    }
+
+    # GitHub에서 고정 키스토어 다운로드 (반드시 이 키를 사용해야 함)
+    download_keystore() {
         # 기존 파일이 있으면 먼저 유효성 검사
         if [ -f "$KEYSTORE_FILE" ]; then
             echo -e "${BLUE}[INFO] 기존 키스토어 유효성 검증 중...${NC}"
             if verify_keystore "$KEYSTORE_FILE"; then
-                echo -e "${GREEN}[OK] 기존 키스토어가 유효합니다. 재사용합니다.${NC}"
+                echo -e "${GREEN}[OK] 기존 키스토어가 유효합니다 (타입: ${KEYSTORE_TYPE}). 재사용합니다.${NC}"
                 return 0
             else
-                echo -e "${YELLOW}[WARN] 기존 키스토어가 손상되었습니다. 삭제 후 재생성합니다.${NC}"
+                echo -e "${YELLOW}[WARN] 기존 키스토어가 손상되었습니다. 다시 다운로드합니다.${NC}"
                 rm -f "$KEYSTORE_FILE"
             fi
         fi
 
-        # 1차: GitHub에서 다운로드 시도
-        echo -e "${YELLOW}[INFO] 서명 키스토어 다운로드 시도 중...${NC}"
-        curl -L -f -o "$KEYSTORE_FILE" "$KEYSTORE_URL" 2>/dev/null || true
+        # 여러 URL로 다운로드 시도
+        local URLS=("$KEYSTORE_URL_1" "$KEYSTORE_URL_2" "$KEYSTORE_URL_3")
+        local DOWNLOADED=0
 
-        # 다운로드된 파일 검증: 크기 + keytool 파싱
-        if [ -f "$KEYSTORE_FILE" ]; then
-            local FILESIZE=$(wc -c < "$KEYSTORE_FILE" 2>/dev/null || echo 0)
-            if [ "$FILESIZE" -lt 100 ]; then
-                echo -e "${YELLOW}[WARN] 다운로드된 키스토어가 너무 작습니다 (${FILESIZE}B). 삭제합니다.${NC}"
-                rm -f "$KEYSTORE_FILE"
-            elif ! verify_keystore "$KEYSTORE_FILE"; then
-                echo -e "${YELLOW}[WARN] 다운로드된 키스토어가 유효한 PKCS12 형식이 아닙니다. 삭제합니다.${NC}"
-                rm -f "$KEYSTORE_FILE"
+        for url in "${URLS[@]}"; do
+            echo -e "${YELLOW}[INFO] 키스토어 다운로드 시도: $(basename "$url")...${NC}"
+            rm -f "$KEYSTORE_FILE"
+            if curl -L -f --connect-timeout 15 --max-time 60 -o "$KEYSTORE_FILE" "$url" 2>/dev/null; then
+                # 다운로드 성공 - 파일 크기 확인
+                local FILESIZE=$(wc -c < "$KEYSTORE_FILE" 2>/dev/null || echo 0)
+                if [ "$FILESIZE" -lt 100 ]; then
+                    echo -e "${YELLOW}[WARN] 다운로드 파일이 너무 작습니다 (${FILESIZE}B). 다음 URL 시도...${NC}"
+                    rm -f "$KEYSTORE_FILE"
+                    continue
+                fi
+
+                # keytool로 유효성 검증 (타입 자동 감지)
+                if verify_keystore "$KEYSTORE_FILE"; then
+                    echo -e "${GREEN}[OK] 키스토어 다운로드 및 검증 완료 (타입: ${KEYSTORE_TYPE})${NC}"
+                    DOWNLOADED=1
+                    break
+                else
+                    echo -e "${YELLOW}[WARN] 다운로드 파일이 유효한 키스토어가 아닙니다. 다음 URL 시도...${NC}"
+                    rm -f "$KEYSTORE_FILE"
+                fi
             else
-                echo -e "${GREEN}[OK] 키스토어 다운로드 및 검증 완료${NC}"
-                return 0
+                echo -e "${YELLOW}[WARN] 다운로드 실패. 다음 URL 시도...${NC}"
+                rm -f "$KEYSTORE_FILE"
             fi
-        fi
+        done
 
-        # 2차: 다운로드 실패/검증 실패 시 keytool로 로컬 생성
-        echo -e "${YELLOW}[INFO] 키스토어를 로컬에서 새로 생성합니다...${NC}"
-        rm -f "$KEYSTORE_FILE"
-        keytool -genkeypair \
-            -alias "$KEYSTORE_ALIAS" \
-            -keyalg RSA -keysize 2048 -validity 10000 \
-            -dname "CN=ReVanced, OU=ReVanced, O=ReVanced, L=Somewhere, ST=Some, C=US" \
-            -keystore "$KEYSTORE_FILE" \
-            -storepass "$KEYSTORE_PASS" \
-            -keypass "$KEYSTORE_PASS" \
-            -storetype PKCS12 2>/dev/null || {
-            echo -e "${RED}[ERROR] 키스토어 생성 실패!${NC}"
-            exit 1
-        }
-
-        # 생성된 키스토어도 검증
-        if verify_keystore "$KEYSTORE_FILE"; then
-            echo -e "${GREEN}[OK] 키스토어 로컬 생성 및 검증 완료${NC}"
-        else
-            echo -e "${RED}[ERROR] 생성된 키스토어가 유효하지 않습니다!${NC}"
+        if [ $DOWNLOADED -eq 0 ]; then
+            echo -e "${RED}============================================${NC}"
+            echo -e "${RED}[ERROR] 고정 키스토어 다운로드에 실패했습니다!${NC}"
+            echo -e "${RED}이 스크립트는 반드시 GitHub의 고정 키스토어를 사용해야 합니다.${NC}"
+            echo -e "${RED}인터넷 연결 또는 GitHub 접속을 확인하세요.${NC}"
+            echo -e "${RED}URL: $KEYSTORE_URL_1${NC}"
+            echo -e "${RED}============================================${NC}"
             exit 1
         fi
     }
-    download_or_create_keystore
+    download_keystore
 }
 
 get_apkm_file() {
@@ -227,15 +240,25 @@ merge_and_sign() {
         exit 1
     fi
     local KS_SIZE=$(wc -c < "$KEYSTORE_FILE" 2>/dev/null || echo 0)
-    echo -e "${BLUE}[DEBUG] 키스토어 크기: ${KS_SIZE}B${NC}"
+    echo -e "${BLUE}[DEBUG] 키스토어 크기: ${KS_SIZE}B / 타입: ${KEYSTORE_TYPE:-자동}${NC}"
 
+    # apksigner 서명 명령 구성
     rm -f "$FINAL_APK"
-    apksigner sign \
-        --ks "$KEYSTORE_FILE" \
-        --ks-key-alias "$KEYSTORE_ALIAS" \
-        --ks-pass "pass:$KEYSTORE_PASS" \
-        --key-pass "pass:$KEYSTORE_PASS" \
-        --out "$FINAL_APK" "$MERGED_APK"
+    local SIGN_CMD=(apksigner sign
+        --ks "$KEYSTORE_FILE"
+        --ks-key-alias "$KEYSTORE_ALIAS"
+        --ks-pass "pass:$KEYSTORE_PASS"
+        --key-pass "pass:$KEYSTORE_PASS"
+    )
+
+    # 감지된 키스토어 타입이 있으면 명시적으로 전달 (JKS/PKCS12 혼동 방지)
+    if [ -n "$KEYSTORE_TYPE" ]; then
+        SIGN_CMD+=(--ks-type "$KEYSTORE_TYPE")
+    fi
+
+    SIGN_CMD+=(--out "$FINAL_APK" "$MERGED_APK")
+
+    "${SIGN_CMD[@]}"
 
     if [ -f "$FINAL_APK" ]; then
         echo -e "\n${GREEN}[============= 성공! =============]${NC}"
