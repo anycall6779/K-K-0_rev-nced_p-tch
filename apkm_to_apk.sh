@@ -31,15 +31,44 @@ check_dependencies() {
     echo -e "${BLUE}[INFO] 필요 도구 확인 중...${NC}"
     
     local MISSING=0
+    
+    install_pkg() {
+        local cmd=$1
+        local pkg=$1
+        
+        # 명령어와 패키지 이름이 다른 경우 매핑
+        if [ "$cmd" = "java" ]; then pkg="openjdk-17"; fi
+        
+        echo -e "${YELLOW}[WARN] '$cmd' 명령어가 없습니다. 설치 시도 중...${NC}"
+        
+        if [ "$cmd" = "zipalign" ]; then
+            # zipalign은 기본 저장소에 없으므로 tur-repo 또는 rendiix 저장소 사용
+            pkg install -y tur-repo 2>/dev/null
+            pkg install -y zipalign 2>/dev/null
+            
+            if ! command -v zipalign &> /dev/null; then
+                echo -e "${YELLOW}[INFO] 외부 저장소(rendiix)를 통해 zipalign 설치 시도...${NC}"
+                curl -s https://raw.githubusercontent.com/rendiix/rendiix.github.io/master/install-repo.sh | bash
+                pkg install -y zipalign
+            fi
+        else
+            pkg install -y $pkg || apt install -y $pkg
+        fi
+        
+        if ! command -v $cmd &> /dev/null; then
+            MISSING=1
+        fi
+    }
+
     for cmd in unzip java wget apksigner zipalign; do
         if ! command -v $cmd &> /dev/null; then
-            echo -e "${YELLOW}[WARN] '$cmd' 명령어가 없습니다. 설치 시도 중...${NC}"
-            apt install -y $cmd || pkg install -y $cmd || MISSING=1
+            install_pkg $cmd
         fi
     done
     
     if [ $MISSING -eq 1 ]; then
-        echo -e "${RED}[ERROR] 일부 도구를 설치할 수 없습니다. 수동으로 설치해주세요: pkg install unzip openjdk-17 wget apksigner zipalign${NC}"
+        echo -e "${RED}[ERROR] 일부 도구를 자동 설치할 수 없습니다.${NC}"
+        echo -e "${RED}수동으로 설치를 확인해주세요: pkg install unzip openjdk-17 wget apksigner zipalign${NC}"
         exit 1
     fi
     
