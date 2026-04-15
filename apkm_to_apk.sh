@@ -680,6 +680,19 @@ get_apkm_file() {
 
 # ─────────────────────────────────────────
 # 5b. 패치 항목 선택 (개별 활성화/비활성화)
+#
+# morphe-cli list-patches 실제 출력 형식 (logger.info → 파일로 받아야 깨끗):
+#   Index: 0
+#   Name: Add settings resources
+#   Description: ...
+#   Enabled: true
+#
+#   Index: 1
+#   Name: Add Packet Handler
+#   ...
+#   Enabled: false
+#
+# 번호 입력 한 번 → 해당 항목 토글(✓↔✗), a/n/r 로 전체제어, Enter 로 확정
 # ─────────────────────────────────────────
 select_patches() {
     echo ""
@@ -688,109 +701,181 @@ select_patches() {
     echo -e "${YELLOW}==================================${NC}"
     echo ""
 
-    # morphe-cli list-patches 로 패치 목록 조회
     echo -e "${BLUE}[INFO] 패치 목록 조회 중...${NC}"
-    local LIST_OUT
-    LIST_OUT=$(java -jar "$MORPHE_CLI_JAR" list-patches \
-        --patches "$MPP_FILE" \
-        -f "$PKG_NAME" 2>/dev/null) || true
+    local LIST_FILE="$WORK_DIR/_patches_list.txt"
+    rm -f "$LIST_FILE"
+
+    # 1순위: --out 파일 옵션 (INFO: 프리픽스 없이 깨끗한 출력)
+    java -jar "$MORPHE_CLI_JAR" list-patches \
+        --patches "$MPP_FILE" -f "$PKG_NAME" \
+        --out "$LIST_FILE" >/dev/null 2>&1 || true
+
+    local LIST_OUT=""
+    if [ -s "$LIST_FILE" ]; then
+        LIST_OUT=$(cat "$LIST_FILE")
+        rm -f "$LIST_FILE"
+    fi
+
+    # 2순위: stdout+stderr 캡처 (--out 미지원 버전 대비)
+    if [ -z "$LIST_OUT" ]; then
+        LIST_OUT=$(java -jar "$MORPHE_CLI_JAR" list-patches \
+            --patches "$MPP_FILE" -f "$PKG_NAME" 2>&1) || true
+    fi
 
     if [ -z "$LIST_OUT" ]; then
         echo -e "${YELLOW}[INFO] 패치 목록 조회 불가 → 전체 패치 적용${NC}"
         return 0
     fi
 
-    # 파싱: "  N. 패치명" 또는 "  N. 패치명 - 설명" 형식
+    # ── 파싱: Index / Name / Enabled ──
     local PATCH_NAMES=()
-    local PATCH_INDICES=()
+    local PATCH_DEFAULT=()   # MPP 기본 활성화 상태 (true/false)
+    local cur_idx="" cur_name="" cur_enabled="" line
     while IFS= read -r line; do
-        local idx name
-        if [[ "$line" =~ ^[[:space:]]*([0-9]+)\.[[:space:]]+(.+)$ ]]; then
-            idx="${BASH_REMATCH[1]}"
-            name="${BASH_REMATCH[2]}"
-            name="${name%% - *}"   # " - 설명" 제거
-            name="${name%%  *}"    # 더블스페이스 이후 제거
-            name="${name%"${name##*[![:space:]]}"}"  # 우측 공백 trim
-            PATCH_INDICES+=("$idx")
-            PATCH_NAMES+=("$name")
+        if [[ "$line" =~ ^INFO:[[:space:]]?(.*) ]]; then line="${BASH_REMATCH[1]}"; fi
+        line="${line#"${line%%[![:space:]]*}"}"
+        if [[ "$line" =~ ^Index:[[:space:]]*([0-9]+) ]]; then
+            cur_idx="${BASH_REMATCH[1]}"
+        elif [[ "$line" =~ ^Name:[[:space:]]*(.+)$ ]]; then
+            cur_name="${BASH_REMATCH[1]}"
+            cur_name="${cur_name%"${cur_name##*[![:space:]]}"}"
+        elif [[ "$line" =~ ^Enabled:[[:space:]]*(true|false) ]]; then
+            cur_enabled="${BASH_REMATCH[1]}"
+            if [ -n "$cur_name" ]; then
+                PATCH_NAMES+=("$cur_name")
+                PATCH_DEFAULT+=("$cur_enabled")
+                cur_idx=""; cur_name=""; cur_enabled=""
+            fi
         fi
     done <<< "$LIST_OUT"
+    if [ -n "$cur_name" ]; then
+        PATCH_NAMES+=("$cur_name")
+        PATCH_DEFAULT+=("${cur_enabled:-true}")
+    fi
 
     if [ ${#PATCH_NAMES[@]} -eq 0 ]; then
         echo -e "${YELLOW}[INFO] 패치 파싱 불가 → 전체 적용${NC}"
+        echo -e "${YELLOW}[DEBUG] 출력 샘플 (300자):${NC}"
+        echo "${LIST_OUT:0:300}"
         return 0
     fi
 
     local total=${#PATCH_NAMES[@]}
+    local i
 
-    # ── 체크리스트 출력 (전체 [✓] 상태) ──
-    echo -e "${CYAN}패치 목록 (${PKG_NAME}) — ${total}개 전체 선택됨:${NC}"
-    echo ""
-    for i in "${!PATCH_NAMES[@]}"; do
-        printf "  ${GREEN}[✓] %3s.${NC} %s\n" "${PATCH_INDICES[$i]}" "${PATCH_NAMES[$i]}"
+    # 현재 선택 상태 (MPP 기본값으로 초기화)
+    local -a STATE=()
+    for i in "${!PATCH_DEFAULT[@]}"; do
+        STATE[$i]="${PATCH_DEFAULT[$i]}"
     done
-    echo ""
-    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "  ${GREEN}Enter${NC}          전체 패치 적용 (기본값)"
-    echo -e "  ${BLUE}1,3,5${NC}          해당 번호를 [✗] 비활성화 (나머지 전부 적용)"
-    echo -e "  ${BLUE}only 1,3,5${NC}     해당 번호만 [✓] 활성화  (나머지 전부 비활성)"
-    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo ""
-    read -r -p "> " PATCH_SEL
 
-    # 빈 입력 → 전체 적용
-    if [ -z "${PATCH_SEL// /}" ]; then
-        echo -e "${GREEN}[OK] 전체 ${total}개 패치 적용${NC}"
-        return 0
-    fi
+    # ── 인터랙티브 토글 루프 ──
+    local need_redraw=1
 
-    # "only N,M,..." → 해당 패치만 활성화
-    if [[ "${PATCH_SEL,,}" =~ ^only[[:space:],]* ]]; then
-        local nums="${PATCH_SEL}"
-        nums="${nums#[Oo][Nn][Ll][Yy]}"   # "only" 제거
-        nums="${nums#[[:space:]]}"
-        PATCH_EXTRA_ARGS+=("--exclusive")
-        local count=0
-        for num in $(echo "$nums" | tr ',' ' '); do
-            num="${num//[^0-9]/}"
-            [ -n "$num" ] || continue
-            PATCH_EXTRA_ARGS+=("--ei=$num")
-            (( count++ ))
-        done
-        echo ""
-        echo -e "${CYAN}최종 선택:${NC}"
-        for i in "${!PATCH_NAMES[@]}"; do
-            local mark="${RED}[✗]${NC}"
-            for arg in "${PATCH_EXTRA_ARGS[@]}"; do
-                [[ "$arg" == "--ei=${PATCH_INDICES[$i]}" ]] && mark="${GREEN}[✓]${NC}" && break
+    while true; do
+
+        # ── 목록 전체 출력 ──
+        if [ "$need_redraw" = "1" ]; then
+            need_redraw=0
+            local on_cnt=0
+            for i in "${!STATE[@]}"; do
+                if [ "${STATE[$i]}" = "true" ]; then on_cnt=$((on_cnt + 1)); fi
             done
-            printf "  %b %3s. %s\n" "$mark" "${PATCH_INDICES[$i]}" "${PATCH_NAMES[$i]}"
-        done
-        echo ""
-        echo -e "${GREEN}[OK] ${count}개 패치만 활성화 (나머지 $((total - count))개 비활성)${NC}"
-        return 0
-    fi
+            echo ""
+            echo -e "${CYAN}╔══ 패치 목록 (${PKG_NAME}) ══╗${NC}"
+            echo ""
+            for i in "${!PATCH_NAMES[@]}"; do
+                if [ "${STATE[$i]}" = "true" ]; then
+                    printf "  ${GREEN}[✓] %2d.${NC} %s\n" "$i" "${PATCH_NAMES[$i]}"
+                else
+                    printf "  ${RED}[✗] %2d.${NC} %s\n" "$i" "${PATCH_NAMES[$i]}"
+                fi
+            done
+            echo ""
+            echo -e "${CYAN}  활성: ${on_cnt}개 / 비활성: $((total - on_cnt))개${NC}"
+            echo -e "${YELLOW}──────────────────────────────────────────────────────${NC}"
+            echo -e "  ${BLUE}숫자${NC}   번호 입력 → 토글(✓↔✗)   예: 3  또는  1,5,7"
+            echo -e "  ${GREEN}a${NC}     전체 활성화  │  ${RED}n${NC} → 전체 비활성화"
+            echo -e "  ${YELLOW}r${NC}     MPP 기본값으로 초기화"
+            echo -e "  ${GREEN}Enter${NC} 현재 선택으로 패치 시작"
+            echo -e "${YELLOW}──────────────────────────────────────────────────────${NC}"
+            echo ""
+        fi
 
-    # "N,M,..." → 해당 패치 비활성화
-    local DISABLE_SET=()
-    for num in $(echo "$PATCH_SEL" | tr ',' ' '); do
-        num="${num//[^0-9]/}"
-        [ -n "$num" ] || continue
-        PATCH_EXTRA_ARGS+=("--di=$num")
-        DISABLE_SET+=("$num")
+        read -r -p "> " input
+
+        # Enter → 확정
+        if [ -z "${input// /}" ]; then
+            break
+        fi
+
+        case "${input,,}" in
+            a)
+                for i in "${!STATE[@]}"; do STATE[$i]="true"; done
+                echo -e "${GREEN}  [✓✓] 전체 활성화${NC}"
+                need_redraw=1
+                ;;
+            n)
+                for i in "${!STATE[@]}"; do STATE[$i]="false"; done
+                echo -e "${RED}  [✗✗] 전체 비활성화${NC}"
+                need_redraw=1
+                ;;
+            r)
+                for i in "${!PATCH_DEFAULT[@]}"; do STATE[$i]="${PATCH_DEFAULT[$i]}"; done
+                echo -e "${YELLOW}  [↺] MPP 기본값으로 초기화${NC}"
+                need_redraw=1
+                ;;
+            *)
+                # 숫자 or 쉼표구분 숫자 목록 → 개별 토글
+                local tok num any_changed=0
+                for tok in $(echo "$input" | tr ',; ' '\n'); do
+                    num="${tok//[^0-9]/}"
+                    if [ -n "$num" ] && [ "$num" -ge 0 ] 2>/dev/null && \
+                       [ "$num" -lt "$total" ] 2>/dev/null; then
+                        if [ "${STATE[$num]}" = "true" ]; then
+                            STATE[$num]="false"
+                            printf "  ${RED}[✗] %2d.${NC} %s\n" "$num" "${PATCH_NAMES[$num]}"
+                        else
+                            STATE[$num]="true"
+                            printf "  ${GREEN}[✓] %2d.${NC} %s\n" "$num" "${PATCH_NAMES[$num]}"
+                        fi
+                        any_changed=1
+                    elif [ -n "$num" ]; then
+                        echo -e "${RED}  [!] 범위 초과: $num (0 ~ $((total-1)))${NC}"
+                    fi
+                done
+                if [ "$any_changed" = "0" ]; then
+                    echo -e "${RED}  [!] 잘못된 입력: '$input'${NC}"
+                fi
+                ;;
+        esac
     done
-    local count=${#DISABLE_SET[@]}
+
+    # ── 최종 선택 요약 ──
     echo ""
     echo -e "${CYAN}최종 선택:${NC}"
+    local final_on=0
     for i in "${!PATCH_NAMES[@]}"; do
-        local mark="${GREEN}[✓]${NC}"
-        for d in "${DISABLE_SET[@]}"; do
-            [[ "$d" == "${PATCH_INDICES[$i]}" ]] && mark="${RED}[✗]${NC}" && break
-        done
-        printf "  %b %3s. %s\n" "$mark" "${PATCH_INDICES[$i]}" "${PATCH_NAMES[$i]}"
+        if [ "${STATE[$i]}" = "true" ]; then
+            printf "  ${GREEN}[✓] %2d.${NC} %s\n" "$i" "${PATCH_NAMES[$i]}"
+            final_on=$((final_on + 1))
+        else
+            printf "  ${RED}[✗] %2d.${NC} %s\n" "$i" "${PATCH_NAMES[$i]}"
+        fi
     done
     echo ""
-    echo -e "${GREEN}[OK] ${count}개 비활성화, $((total - count))개 적용 예정${NC}"
+    echo -e "${GREEN}[OK] 활성: ${final_on}개 / 비활성: $((total - final_on))개${NC}"
+
+    # ── PATCH_EXTRA_ARGS 구성 (MPP 기본값 대비 변경분만) ──
+    for i in "${!PATCH_NAMES[@]}"; do
+        if [ "${STATE[$i]}" = "true" ] && [ "${PATCH_DEFAULT[$i]}" = "false" ]; then
+            # 기본 OFF → 사용자가 ON
+            PATCH_EXTRA_ARGS+=("-e" "${PATCH_NAMES[$i]}")
+        elif [ "${STATE[$i]}" = "false" ] && [ "${PATCH_DEFAULT[$i]}" = "true" ]; then
+            # 기본 ON → 사용자가 OFF
+            PATCH_EXTRA_ARGS+=("-d" "${PATCH_NAMES[$i]}")
+        fi
+    done
 }
 
 # ─────────────────────────────────────────
