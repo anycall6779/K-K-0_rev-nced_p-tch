@@ -48,6 +48,8 @@ KEYSTORE_SOURCE_URL="https://github.com/anycall6779/K-K-0_rev-nced_p-tch/raw/ref
 KEYSTORE_FILE="$WORK_DIR/my_kakao_key.keystore"
 KEYSTORE_PASS=""
 KEYSTORE_ALIAS="ReVanced Key"
+# 목표 서명 serial – kakaotalkpatch_unclone.apk 와 반드시 일치해야 업데이트 설치 가능
+WANT_KS_SERIAL="19f687f04ccebf6b"
 
 # 출력 파일명 (기존 kakaotalkpatch_unclone.apk 와 키 일치 → 업데이트 가능)
 OUTPUT_APK="$BASE_DIR/KakaoTalk_Patched.apk"
@@ -121,12 +123,13 @@ check_dependencies() {
 # → keytool -storetype BKS 가 JDK 환경에 따라 실패하는 문제를 완전히 우회
 # ─────────────────────────────────────────
 
-# VerifyBKS.class + ResignAPK.class + GetAPKSerial.class 컴파일 (최초 1회)
+# VerifyBKS + ResignAPK + GetAPKSerial + GetKeystoreSerial 컴파일 (최초 1회)
 _init_bks_checker() {
     local need=0
-    [ -f "$WORK_DIR/VerifyBKS.class" ]    || need=1
-    [ -f "$WORK_DIR/ResignAPK.class" ]    || need=1
-    [ -f "$WORK_DIR/GetAPKSerial.class" ] || need=1
+    [ -f "$WORK_DIR/VerifyBKS.class" ]        || need=1
+    [ -f "$WORK_DIR/ResignAPK.class" ]         || need=1
+    [ -f "$WORK_DIR/GetAPKSerial.class" ]      || need=1
+    [ -f "$WORK_DIR/GetKeystoreSerial.class" ] || need=1
     [ $need -eq 0 ] && return 0
 
     cat > "$WORK_DIR/VerifyBKS.java" << 'JEOF'
@@ -205,6 +208,29 @@ public class GetAPKSerial {
 }
 JEOF
     javac -cp "$MORPHE_CLI_JAR" -d "$WORK_DIR" "$WORK_DIR/GetAPKSerial.java" >/dev/null 2>&1
+
+    # GetKeystoreSerial: keystore 파일에서 직접 인증서 serial 추출
+    # → APK 없이도 keystore 가 올바른지 검증 가능 (wrong keystore 선택 방지 핵심)
+    cat > "$WORK_DIR/GetKeystoreSerial.java" << 'JEOF'
+import java.io.*;
+import java.security.*;
+import java.security.cert.X509Certificate;
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
+public class GetKeystoreSerial {
+    public static void main(String[] a) throws Exception {
+        // args: <keystore.bks> <storepass> <alias>
+        Security.addProvider(new BouncyCastleProvider());
+        KeyStore ks = KeyStore.getInstance("BKS", "BC");
+        try (FileInputStream f = new FileInputStream(a[0])) {
+            ks.load(f, a[1].toCharArray());
+        }
+        java.security.cert.Certificate cert = ks.getCertificate(a[2]);
+        if (cert instanceof X509Certificate)
+            System.out.println(((X509Certificate)cert).getSerialNumber().toString(16));
+    }
+}
+JEOF
+    javac -cp "$MORPHE_CLI_JAR" -d "$WORK_DIR" "$WORK_DIR/GetKeystoreSerial.java" >/dev/null 2>&1
 }
 
 # BKS 검증: 성공 시 alias 출력(exit 0), 실패 시 exit 1
@@ -214,6 +240,15 @@ _check_bks() {
     [ -f "$ks" ] || return 1
     [ -f "$WORK_DIR/VerifyBKS.class" ] || return 1
     java -cp "$MORPHE_CLI_JAR:$WORK_DIR" VerifyBKS "$ks" "$pass" 2>/dev/null
+}
+
+# Keystore 인증서 serial 추출 (BKS + BouncyCastle)
+# 사용법: serial=$(_get_ks_serial ks.file password alias)
+_get_ks_serial() {
+    local ks="$1" pass="$2" alias="$3"
+    [ -f "$ks" ] || return 1
+    [ -f "$WORK_DIR/GetKeystoreSerial.class" ] || return 1
+    java -cp "$MORPHE_CLI_JAR:$WORK_DIR" GetKeystoreSerial "$ks" "$pass" "$alias" 2>/dev/null
 }
 
 # APK 서명을 올바른 키로 교체 (morphe-cli 가 엉뚱한 키로 서명했을 때)
@@ -349,13 +384,20 @@ setup_keystore() {
     echo -e "${BLUE}[INFO] keystore 탐색 중...${NC}"
     local FOUND_KS="" FOUND_PASS="" FOUND_ALIAS=""
 
-    # ── 1단계: VerifyBKS.class 로 BKS 직접 검증 ──
+    # ── 1단계: BKS 검증 + serial 검사 (WANT_KS_SERIAL 일치 필수) ──
     for ks in "${CANDIDATES[@]}"; do
         [ -f "$ks" ] || continue
         for pass in "${PASS_LIST[@]}"; do
             local got_alias
             got_alias=$(_check_bks "$ks" "$pass") || continue
             [ -n "$got_alias" ] || continue
+            # ★ serial 검증: 잘못된 keystore(kakaotalk-patched 등) 를 걸러냄
+            local got_serial
+            got_serial=$(_get_ks_serial "$ks" "$pass" "$got_alias") || got_serial=""
+            if [ -n "$got_serial" ] && [ "$got_serial" != "$WANT_KS_SERIAL" ]; then
+                echo -e "${YELLOW}[SKIP] $(basename "$ks"): serial=$got_serial ≠ $WANT_KS_SERIAL${NC}"
+                break  # 이 keystore는 serial이 달라 모든 패스워드 무의미
+            fi
             FOUND_KS="$ks"; FOUND_PASS="$pass"; FOUND_ALIAS="$got_alias"
             break 2
         done
@@ -378,6 +420,13 @@ setup_keystore() {
                 if _conv_to_bks "$ks" "$pass" "$TMP_BKS" "android"; then
                     local got_alias
                     got_alias=$(_check_bks "$TMP_BKS" "android") || got_alias="$KEYSTORE_ALIAS"
+                    # ★ serial 검증: 변환 후에도 serial 이 목표와 일치해야 함
+                    local conv_serial
+                    conv_serial=$(_get_ks_serial "$TMP_BKS" "android" "${got_alias:-$KEYSTORE_ALIAS}") || conv_serial=""
+                    if [ -n "$conv_serial" ] && [ "$conv_serial" != "$WANT_KS_SERIAL" ]; then
+                        echo -e "${YELLOW}[SKIP] $(basename "$ks") 변환 후 serial=$conv_serial ≠ $WANT_KS_SERIAL${NC}"
+                        rm -f "$TMP_BKS"; continue
+                    fi
                     cp "$TMP_BKS" "$KEYSTORE_FILE"; rm -f "$TMP_BKS"
                     KEYSTORE_PASS="android"
                     KEYSTORE_ALIAS="${got_alias:-$KEYSTORE_ALIAS}"
@@ -385,7 +434,7 @@ setup_keystore() {
                     echo "$ks" | grep -q "kakaotalk-patched" \
                         && label="★ 기존 서명 일치 → BKS 변환" \
                         || label="$(basename "$ks") → BKS 변환"
-                    echo -e "${GREEN}[OK] $label 완료${NC}"
+                    echo -e "${GREEN}[OK] $label 완료 (serial: ${conv_serial:-?})${NC}"
                     echo -e "${GREEN}[OK] Keystore: $KEYSTORE_FILE  Pass: $KEYSTORE_PASS  Alias: $KEYSTORE_ALIAS${NC}"
                     return 0
                 fi
@@ -406,6 +455,9 @@ setup_keystore() {
         echo -e "${GREEN}[OK] Keystore: $KEYSTORE_FILE${NC}"
         echo -e "${CYAN}     Pass  : $KEYSTORE_PASS${NC}"
         echo -e "${CYAN}     Alias : $KEYSTORE_ALIAS${NC}"
+        local ks_serial
+        ks_serial=$(_get_ks_serial "$KEYSTORE_FILE" "$KEYSTORE_PASS" "$KEYSTORE_ALIAS") || ks_serial=""
+        echo -e "${CYAN}     Serial: ${ks_serial:-검출불가}${NC}"
         return 0
     fi
 
@@ -425,8 +477,16 @@ setup_keystore() {
             local got_alias
             got_alias=$(_check_bks "$KEYSTORE_FILE" "$pass") || continue
             [ -n "$got_alias" ] || continue
+            # ★ serial 검증
+            local got_serial
+            got_serial=$(_get_ks_serial "$KEYSTORE_FILE" "$pass" "$got_alias") || got_serial=""
+            if [ -n "$got_serial" ] && [ "$got_serial" != "$WANT_KS_SERIAL" ]; then
+                echo -e "${RED}[ERROR] GitHub keystore serial 불일치: $got_serial ≠ $WANT_KS_SERIAL${NC}"
+                echo -e "${RED}        URL 의 keystore 가 올바르지 않습니다. 수동으로 my_kakao_key.keystore 를 제공하세요.${NC}"
+                break
+            fi
             KEYSTORE_PASS="$pass"; KEYSTORE_ALIAS="$got_alias"
-            echo -e "${GREEN}[OK] GitHub keystore 검증 완료 (pass=$pass alias=$got_alias)${NC}"
+            echo -e "${GREEN}[OK] GitHub keystore 검증 완료 (serial=${got_serial:-?} pass=$pass alias=$got_alias)${NC}"
             echo -e "${GREEN}[OK] Keystore: $KEYSTORE_FILE${NC}"
             return 0
         done
