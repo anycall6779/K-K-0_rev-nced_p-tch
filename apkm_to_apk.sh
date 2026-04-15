@@ -110,7 +110,17 @@ check_dependencies() {
 }
 
 # ─────────────────────────────────────────
-# 2. Keystore 준비 (kakaotalkpatch_unclone.apk 동일 서명)
+# 2. Keystore 준비 – 기존 서명 유지 우선 탐색
+#
+# 탐색 우선순위:
+#   1) kakaotalk-patched.keystore  ← 실제 앱에 서명된 키 (serial 7633c4653cf2dc48)
+#   2) my_kakao_key.keystore 여러 경로
+#   3) GitHub 다운로드
+#
+# 각 후보에 대해:
+#   a) BKS 직접 검증 (여러 비밀번호 시도)
+#   b) 실패 시 JKS/PKCS12 → BKS 변환 (비밀번호 유지)
+#   c) 전부 실패 시 새 BKS 생성 (경고 후 진행)
 # ─────────────────────────────────────────
 setup_keystore() {
     echo ""
@@ -118,43 +128,201 @@ setup_keystore() {
     echo -e "${GREEN}Keystore 준비 (서명 일치 확인)${NC}"
     echo -e "${YELLOW}==================================${NC}"
 
-    # 로컬에 있으면 그대로 사용
-    if [ ! -f "$KEYSTORE_FILE" ]; then
-        # 스크립트 옆에 있는지 확인
-        local SCRIPT_DIR
-        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || SCRIPT_DIR="$BASE_DIR"
-        if [ -f "$SCRIPT_DIR/my_kakao_key.keystore" ]; then
-            cp "$SCRIPT_DIR/my_kakao_key.keystore" "$KEYSTORE_FILE"
-            echo -e "${GREEN}[OK] 로컬 keystore 복사 완료${NC}"
-        elif [ -f "$BASE_DIR/my_kakao_key.keystore" ]; then
-            cp "$BASE_DIR/my_kakao_key.keystore" "$KEYSTORE_FILE"
-            echo -e "${GREEN}[OK] 다운로드 폴더 keystore 복사 완료${NC}"
+    local TMP_BKS="$WORK_DIR/_ks_tmp.keystore"
+
+    # ── 비밀번호 후보 (ReVanced 프로젝트에서 흔히 쓰이는 값) ──
+    local PASS_LIST=("android" "ReVanced" "revanced" "password" "test" "123456" "keystorepassword" "changeit")
+
+    # ── 후보 keystore 경로 (우선순위 순) ──
+    # kakaotalk-patched.keystore = 앱에 실제 서명된 키 (serial 7633c4653cf2dc48)
+    local SCRIPT_DIR_LOCAL
+    SCRIPT_DIR_LOCAL="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || SCRIPT_DIR_LOCAL="$BASE_DIR"
+
+    local CANDIDATES=(
+        "$HOME/revanced-kakao-patch/kakaotalk-patched.keystore"
+        "$HOME/morphe-kakao/kakaotalk-patched.keystore"
+        "$BASE_DIR/kakaotalk-patched.keystore"
+        "$SCRIPT_DIR_LOCAL/kakaotalk-patched.keystore"
+        "$WORK_DIR/kakaotalk-patched.keystore"
+        "$KEYSTORE_FILE"
+        "$SCRIPT_DIR_LOCAL/my_kakao_key.keystore"
+        "$BASE_DIR/my_kakao_key.keystore"
+        "$HOME/my_kakao_key.keystore"
+        "$HOME/Downloads/my_kakao_key.keystore"
+        "$HOME/morphe-kakao/my_kakao_key.keystore"
+        "$HOME/revanced-build-script-ample/my_kakao_key.keystore"
+        "$HOME/kakao-revanced-patch/my_kakao_key.keystore"
+    )
+
+    # ── BKS 검증 헬퍼 (후보 파일, 비밀번호) ──
+    _try_bks() {
+        local ks="$1" pass="$2"
+        [ -f "$ks" ] || return 1
+        keytool -list -keystore "$ks" \
+            -storepass "$pass" \
+            -storetype BKS \
+            -provider org.bouncycastle.jce.provider.BouncyCastleProvider \
+            -providerpath "$MORPHE_CLI_JAR" \
+            >/dev/null 2>&1
+    }
+
+    # ── JKS/PKCS12 → BKS 변환 헬퍼 (src, src_pass, dst, dst_pass) ──
+    _conv_to_bks() {
+        local src="$1" sp="$2" dst="$3" dp="$4"
+        rm -f "$dst"
+        keytool -importkeystore -noprompt \
+            -srckeystore  "$src" \
+            -srcstorepass "$sp" \
+            -destkeystore "$dst" \
+            -deststorepass "$dp" \
+            -deststoretype  BKS \
+            -provider org.bouncycastle.jce.provider.BouncyCastleProvider \
+            -providerpath "$MORPHE_CLI_JAR" \
+            >/dev/null 2>&1 && [ -s "$dst" ]
+    }
+
+    # ─────────────────────────────────────
+    # 1단계: 후보 파일 × 비밀번호 목록으로 BKS 직접 검증
+    # ─────────────────────────────────────
+    echo -e "${BLUE}[INFO] 기존 keystore 탐색 중 (서명 보존 우선)...${NC}"
+    local FOUND_KS="" FOUND_PASS=""
+
+    for ks in "${CANDIDATES[@]}"; do
+        [ -f "$ks" ] || continue
+        for pass in "${PASS_LIST[@]}"; do
+            if _try_bks "$ks" "$pass"; then
+                FOUND_KS="$ks"
+                FOUND_PASS="$pass"
+                break 2
+            fi
+        done
+    done
+
+    # ─────────────────────────────────────
+    # 2단계: BKS 직접 실패 → JKS/PKCS12 → BKS 변환 시도
+    # ─────────────────────────────────────
+    if [ -z "$FOUND_KS" ]; then
+        echo -e "${YELLOW}[INFO] BKS 직접 검증 불가 → 형식 변환 시도...${NC}"
+        for ks in "${CANDIDATES[@]}"; do
+            [ -f "$ks" ] || continue
+            for pass in "${PASS_LIST[@]}"; do
+                # JKS 또는 PKCS12 로 읽히는지 확인
+                local readable=0
+                for fmt in JKS PKCS12; do
+                    if keytool -list -keystore "$ks" -storepass "$pass" \
+                               -storetype "$fmt" >/dev/null 2>&1; then
+                        readable=1; break
+                    fi
+                done
+                [ $readable -eq 1 ] || continue
+                # BKS 로 변환
+                if _conv_to_bks "$ks" "$pass" "$TMP_BKS" "$KEYSTORE_PASS"; then
+                    cp "$TMP_BKS" "$KEYSTORE_FILE"
+                    rm -f "$TMP_BKS"
+                    echo -e "${GREEN}[OK] $(basename "$ks") → BKS 변환 완료 (pass=$pass)${NC}"
+                    echo -e "${GREEN}[OK] Keystore: $KEYSTORE_FILE${NC}"
+                    echo -e "${CYAN}     Alias  : $KEYSTORE_ALIAS${NC}"
+                    echo -e "${CYAN}     Pass   : $KEYSTORE_PASS${NC}"
+                    return 0
+                fi
+            done
+        done
+    fi
+
+    # ─────────────────────────────────────
+    # 3단계: BKS 발견 → WORK_DIR 에 복사
+    # ─────────────────────────────────────
+    if [ -n "$FOUND_KS" ]; then
+        if [ "$FOUND_KS" != "$KEYSTORE_FILE" ] || [ "$FOUND_PASS" != "$KEYSTORE_PASS" ]; then
+            # 비밀번호가 다르면 KEYSTORE_PASS 로 재암호화
+            if [ "$FOUND_PASS" != "$KEYSTORE_PASS" ]; then
+                echo -e "${YELLOW}[INFO] 비밀번호 재설정 중 ($FOUND_PASS → $KEYSTORE_PASS)...${NC}"
+                _conv_to_bks "$FOUND_KS" "$FOUND_PASS" "$TMP_BKS" "$KEYSTORE_PASS" && \
+                    cp "$TMP_BKS" "$KEYSTORE_FILE" && rm -f "$TMP_BKS" || \
+                    cp "$FOUND_KS" "$KEYSTORE_FILE"
+                # 비밀번호를 발견된 비밀번호로 업데이트
+                KEYSTORE_PASS="$FOUND_PASS"
+                cp "$FOUND_KS" "$KEYSTORE_FILE"
+            else
+                cp "$FOUND_KS" "$KEYSTORE_FILE"
+            fi
+            local KS_TYPE
+            if echo "$FOUND_KS" | grep -q "kakaotalk-patched"; then
+                KS_TYPE="★ 기존 서명 일치 키스토어"
+            else
+                KS_TYPE="$(basename "$FOUND_KS")"
+            fi
+            echo -e "${GREEN}[OK] Keystore 로드: $KS_TYPE${NC}"
         else
-            echo -e "${YELLOW}[INFO] keystore 다운로드 중 (GitHub)...${NC}"
-            curl -L --progress-bar -o "$KEYSTORE_FILE" "$KEYSTORE_SOURCE_URL" || {
-                echo -e "${RED}[ERROR] keystore 다운로드 실패${NC}"
-                return 1
-            }
+            echo -e "${GREEN}[OK] Keystore 유효 (BKS, pass=$FOUND_PASS)${NC}"
         fi
+        echo -e "${GREEN}[OK] Keystore: $KEYSTORE_FILE${NC}"
+        echo -e "${CYAN}     Alias  : $KEYSTORE_ALIAS${NC}"
+        echo -e "${CYAN}     Pass   : $KEYSTORE_PASS${NC}"
+        return 0
     fi
 
-    # 유효성 검사
-    echo -e "${BLUE}[INFO] keystore 유효성 확인 중...${NC}"
-    if keytool -list -keystore "$KEYSTORE_FILE" \
-              -storepass "$KEYSTORE_PASS" \
-              -storetype BKS \
-              -provider org.bouncycastle.jce.provider.BouncyCastleProvider \
-              -providerpath "$MORPHE_CLI_JAR" \
-              >/dev/null 2>&1; then
-        echo -e "${GREEN}[OK] Keystore 유효 (BKS 형식)${NC}"
-    elif keytool -list -keystore "$KEYSTORE_FILE" \
-                -storepass "$KEYSTORE_PASS" \
-                >/dev/null 2>&1; then
-        echo -e "${GREEN}[OK] Keystore 유효 (JKS/PKCS12 형식)${NC}"
-    else
-        echo -e "${YELLOW}[WARN] keytool 직접 검사 실패 – morphe-cli가 BKS를 내부 처리합니다${NC}"
-    fi
+    # ─────────────────────────────────────
+    # 4단계: 로컬 완전 실패 → GitHub 다운로드 후 재시도
+    # ─────────────────────────────────────
+    echo -e "${YELLOW}[INFO] 로컬에서 유효한 keystore 없음 → GitHub 다운로드...${NC}"
+    curl -L --progress-bar --retry 3 -o "$KEYSTORE_FILE" "$KEYSTORE_SOURCE_URL" || {
+        echo -e "${RED}[ERROR] keystore 다운로드 실패${NC}"
+        return 1
+    }
+    for pass in "${PASS_LIST[@]}"; do
+        if _try_bks "$KEYSTORE_FILE" "$pass"; then
+            KEYSTORE_PASS="$pass"
+            echo -e "${GREEN}[OK] GitHub keystore BKS 검증 완료 (pass=$pass)${NC}"
+            echo -e "${GREEN}[OK] Keystore: $KEYSTORE_FILE${NC}"
+            echo -e "${CYAN}     Alias  : $KEYSTORE_ALIAS${NC}"
+            echo -e "${CYAN}     Pass   : $KEYSTORE_PASS${NC}"
+            return 0
+        fi
+    done
+    # 변환 시도
+    for pass in "${PASS_LIST[@]}"; do
+        if _conv_to_bks "$KEYSTORE_FILE" "$pass" "$TMP_BKS" "$KEYSTORE_PASS"; then
+            cp "$TMP_BKS" "$KEYSTORE_FILE"; rm -f "$TMP_BKS"
+            echo -e "${GREEN}[OK] GitHub keystore → BKS 변환 완료${NC}"
+            echo -e "${GREEN}[OK] Keystore: $KEYSTORE_FILE${NC}"
+            echo -e "${CYAN}     Alias  : $KEYSTORE_ALIAS${NC}"
+            echo -e "${CYAN}     Pass   : $KEYSTORE_PASS${NC}"
+            return 0
+        fi
+    done
 
+    # ─────────────────────────────────────
+    # 5단계: 최후 수단 – 새 BKS 생성 (서명 변경 경고)
+    # ─────────────────────────────────────
+    echo ""
+    echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${RED}[경고] 기존 서명 키를 찾을 수 없습니다.${NC}"
+    echo -e "${RED}       새 키로 서명하면 기존 패치 앱을${NC}"
+    echo -e "${RED}       삭제 후 새로 설치해야 합니다.${NC}"
+    echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo -e "${YELLOW}계속하려면 Enter, 중단하려면 Ctrl+C${NC}"
+    read -r
+
+    rm -f "$KEYSTORE_FILE"
+    if ! keytool -genkeypair -noprompt \
+                 -alias     "$KEYSTORE_ALIAS" \
+                 -keyalg    RSA \
+                 -keysize   4096 \
+                 -validity  10000 \
+                 -keystore  "$KEYSTORE_FILE" \
+                 -storepass "$KEYSTORE_PASS" \
+                 -keypass   "$KEYSTORE_PASS" \
+                 -storetype BKS \
+                 -provider  org.bouncycastle.jce.provider.BouncyCastleProvider \
+                 -providerpath "$MORPHE_CLI_JAR" \
+                 -dname "CN=ReVanced, OU=ReVanced, O=ReVanced, L=ReVanced, S=ReVanced, C=US" \
+                 >/dev/null 2>&1; then
+        echo -e "${RED}[ERROR] BKS keystore 생성 실패${NC}"
+        return 1
+    fi
+    echo -e "${GREEN}[OK] 새 BKS keystore 생성 완료${NC}"
     echo -e "${GREEN}[OK] Keystore: $KEYSTORE_FILE${NC}"
     echo -e "${CYAN}     Alias  : $KEYSTORE_ALIAS${NC}"
     echo -e "${CYAN}     Pass   : $KEYSTORE_PASS${NC}"
