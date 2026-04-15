@@ -110,88 +110,95 @@ check_dependencies() {
 }
 
 # ─────────────────────────────────────────
-# BKS 검증 헬퍼 – morphe-cli JAR의 BC 프로바이더 사용
-# 반환: 0=성공, 1=실패
+# BKS 검증 헬퍼
+#
+# 핵심: morphe-cli JAR 안의 BouncyCastle을 javac/java -cp 로 직접 사용
+# VerifyBKS.java 를 컴파일해서 실제 KeyStore.load() 성공 여부를 확인
+# → keytool -storetype BKS 가 JDK 환경에 따라 실패하는 문제를 완전히 우회
 # ─────────────────────────────────────────
-_ks_bks_ok() {
-    local ks="$1" pass="$2"
-    [ -f "$ks" ] || return 1
-    # Java 9+ -addmods 방식과 -provider 방식 모두 시도
-    keytool -list \
-        -J-cp -J"$MORPHE_CLI_JAR" \
-        -keystore "$ks" \
-        -storepass "$pass" \
-        -storetype BKS \
-        -provider org.bouncycastle.jce.provider.BouncyCastleProvider \
-        >/dev/null 2>&1 && return 0
-    # fallback: -providerpath 방식
-    keytool -list \
-        -keystore "$ks" \
-        -storepass "$pass" \
-        -storetype BKS \
-        -provider org.bouncycastle.jce.provider.BouncyCastleProvider \
-        -providerpath "$MORPHE_CLI_JAR" \
-        >/dev/null 2>&1
+
+# VerifyBKS.class 컴파일 (최초 1회)
+_init_bks_checker() {
+    [ -f "$WORK_DIR/VerifyBKS.class" ] && return 0
+    cat > "$WORK_DIR/VerifyBKS.java" << 'JEOF'
+import java.io.*;
+import java.security.*;
+import java.util.*;
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
+public class VerifyBKS {
+    public static void main(String[] a) throws Exception {
+        Security.addProvider(new BouncyCastleProvider());
+        KeyStore ks = KeyStore.getInstance("BKS", "BC");
+        try (FileInputStream f = new FileInputStream(a[0])) {
+            ks.load(f, a[1].toCharArray());
+        }
+        Enumeration<String> al = ks.aliases();
+        System.out.println(al.hasMoreElements() ? al.nextElement() : "alias");
+    }
+}
+JEOF
+    javac -cp "$MORPHE_CLI_JAR" -d "$WORK_DIR" "$WORK_DIR/VerifyBKS.java" >/dev/null 2>&1
 }
 
-# ─────────────────────────────────────────
-# JKS/PKCS12 → BKS 변환 헬퍼
-# ─────────────────────────────────────────
-_ks_conv_bks() {
+# BKS 검증: 성공 시 alias 출력(exit 0), 실패 시 exit 1
+# 사용법: alias=$(_check_bks ks.file password) && echo "유효"
+_check_bks() {
+    local ks="$1" pass="$2"
+    [ -f "$ks" ] || return 1
+    [ -f "$WORK_DIR/VerifyBKS.class" ] || return 1
+    java -cp "$MORPHE_CLI_JAR:$WORK_DIR" VerifyBKS "$ks" "$pass" 2>/dev/null
+}
+
+# JKS/PKCS12 → BKS 변환 (src, src_pass, dst, dst_pass)
+_conv_to_bks() {
     local src="$1" sp="$2" dst="$3" dp="$4"
     rm -f "$dst"
     keytool -importkeystore -noprompt \
-        -J-cp -J"$MORPHE_CLI_JAR" \
-        -srckeystore   "$src" \
-        -srcstorepass  "$sp" \
-        -destkeystore  "$dst" \
-        -deststorepass "$dp" \
+        -srckeystore  "$src" -srcstorepass  "$sp" \
+        -destkeystore "$dst" -deststorepass "$dp" \
         -deststoretype BKS \
         -provider org.bouncycastle.jce.provider.BouncyCastleProvider \
-        >/dev/null 2>&1 || \
+        -providerpath "$MORPHE_CLI_JAR" >/dev/null 2>&1 ||
     keytool -importkeystore -noprompt \
-        -srckeystore   "$src" \
-        -srcstorepass  "$sp" \
-        -destkeystore  "$dst" \
-        -deststorepass "$dp" \
+        -J-cp -J"$MORPHE_CLI_JAR" \
+        -srckeystore  "$src" -srcstorepass  "$sp" \
+        -destkeystore "$dst" -deststorepass "$dp" \
         -deststoretype BKS \
         -provider org.bouncycastle.jce.provider.BouncyCastleProvider \
-        -providerpath  "$MORPHE_CLI_JAR" \
         >/dev/null 2>&1
     [ -s "$dst" ]
 }
 
-# ─────────────────────────────────────────
-# morphe-cli 로 실제 서명 테스트 (가장 확실한 검증)
-# 빈 ZIP 을 서명해보는 방식
-# ─────────────────────────────────────────
-_ks_morphe_ok() {
-    local ks="$1" pass="$2" alias_="$3"
-    local probe_apk="$WORK_DIR/_probe.apk"
-    # 최소 유효 ZIP 생성 (PK header)
-    printf 'PK\x05\x06\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00' > "$probe_apk" 2>/dev/null
-    local result
-    result=$(java -jar "$MORPHE_CLI_JAR" sign \
-        --keystore "$ks" \
-        --keystore-password "$pass" \
-        --keystore-entry-alias "$alias_" \
-        --keystore-entry-password "$pass" \
-        "$probe_apk" 2>&1 | tail -1) || true
-    rm -f "$probe_apk"
-    # "integrity check failed" 가 없으면 성공
-    echo "$result" | grep -qi "integrity check failed" && return 1
-    echo "$result" | grep -qi "error\|exception\|failed" && return 1
-    return 0
+# 새 BKS keystore 생성 (서명 변경 수반)
+_gen_new_bks() {
+    rm -f "$KEYSTORE_FILE"
+    # 방법1: keytool + -providerpath
+    keytool -genkeypair -noprompt \
+        -alias "$KEYSTORE_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 \
+        -keystore "$KEYSTORE_FILE" -storepass "android" -keypass "android" \
+        -storetype BKS \
+        -provider org.bouncycastle.jce.provider.BouncyCastleProvider \
+        -providerpath "$MORPHE_CLI_JAR" \
+        -dname "CN=ReVanced,O=ReVanced,C=US" >/dev/null 2>&1 && { KEYSTORE_PASS="android"; return 0; }
+    # 방법2: keytool + -J-cp
+    keytool -genkeypair -noprompt \
+        -J-cp -J"$MORPHE_CLI_JAR" \
+        -alias "$KEYSTORE_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 \
+        -keystore "$KEYSTORE_FILE" -storepass "android" -keypass "android" \
+        -storetype BKS \
+        -provider org.bouncycastle.jce.provider.BouncyCastleProvider \
+        -dname "CN=ReVanced,O=ReVanced,C=US" >/dev/null 2>&1 && { KEYSTORE_PASS="android"; return 0; }
+    # 방법3: PKCS12 fallback (morphe-cli가 지원하는지 미확인이나 최후 수단)
+    keytool -genkeypair -noprompt \
+        -alias "$KEYSTORE_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 \
+        -keystore "$KEYSTORE_FILE" -storepass "android" -keypass "android" \
+        -storetype PKCS12 \
+        -dname "CN=ReVanced,O=ReVanced,C=US" >/dev/null 2>&1 && { KEYSTORE_PASS="android"; return 0; }
+    return 1
 }
 
 # ─────────────────────────────────────────
-# 2. Keystore 준비 – 기존 서명 유지 우선 탐색
-#
-# 탐색 우선순위:
-#   1) kakaotalk-patched.keystore  ← 실제 앱에 서명된 키 (serial 7633c4653cf2dc48)
-#   2) my_kakao_key.keystore 여러 경로
-#   3) GitHub 다운로드
-#   4) 최후: 새 BKS 생성
+# 2. Keystore 준비
 # ─────────────────────────────────────────
 setup_keystore() {
     echo ""
@@ -199,14 +206,19 @@ setup_keystore() {
     echo -e "${GREEN}Keystore 준비 (서명 일치 확인)${NC}"
     echo -e "${YELLOW}==================================${NC}"
 
+    # VerifyBKS.class 컴파일 (morphe-cli JAR 준비 이후 호출됨)
+    if ! _init_bks_checker; then
+        echo -e "${YELLOW}[WARN] VerifyBKS 컴파일 실패 (javac 미설치?): pkg install default-jdk${NC}"
+    fi
+
     local TMP_BKS="$WORK_DIR/_ks_tmp.keystore"
-    local PASS_LIST=("android" "ReVanced" "revanced" "password" "test" "123456" "keystorepassword" "changeit")
+
+    # revanced-cli 자동생성 기본값 "ReVanced Key" 포함
+    local PASS_LIST=("android" "ReVanced Key" "revanced" "ReVanced" "password" "test" "123456" "changeit" "")
 
     local SCRIPT_DIR_LOCAL
     SCRIPT_DIR_LOCAL="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || SCRIPT_DIR_LOCAL="$BASE_DIR"
 
-    # kakaotalk-patched.keystore 를 최우선: 워크스페이스confirmed 서명 키
-    # 그 다음 my_kakao_key.keystore 여러 경로
     local CANDIDATES=(
         "$HOME/revanced-kakao-patch/kakaotalk-patched.keystore"
         "$HOME/morphe-kakao/kakaotalk-patched.keystore"
@@ -223,69 +235,76 @@ setup_keystore() {
         "$HOME/kakao-revanced-patch/my_kakao_key.keystore"
         "$HOME/revanced-build-script/output/patched.keystore"
     )
-    # find로 추가 탐색 (Termux 홈 전체)
+    # Termux 홈 전체 스캔 (깊이 4)
     while IFS= read -r extra; do
         CANDIDATES+=("$extra")
     done < <(find "$HOME" -maxdepth 4 -name "*.keystore" 2>/dev/null | sort)
 
-    echo -e "${BLUE}[INFO] keystore 탐색 중 (서명 보존 우선)...${NC}"
+    echo -e "${BLUE}[INFO] keystore 탐색 중...${NC}"
+    local FOUND_KS="" FOUND_PASS="" FOUND_ALIAS=""
 
-    local FOUND_KS="" FOUND_PASS=""
-
-    # ── 1단계: BKS 직접 검증 (morphe-cli probe 방식) ──
+    # ── 1단계: VerifyBKS.class 로 BKS 직접 검증 ──
     for ks in "${CANDIDATES[@]}"; do
         [ -f "$ks" ] || continue
         for pass in "${PASS_LIST[@]}"; do
-            if _ks_morphe_ok "$ks" "$pass" "$KEYSTORE_ALIAS"; then
-                FOUND_KS="$ks"; FOUND_PASS="$pass"
-                break 2
-            fi
-            if _ks_bks_ok "$ks" "$pass"; then
-                FOUND_KS="$ks"; FOUND_PASS="$pass"
-                break 2
-            fi
+            local got_alias
+            got_alias=$(_check_bks "$ks" "$pass") || continue
+            [ -n "$got_alias" ] || continue
+            FOUND_KS="$ks"; FOUND_PASS="$pass"; FOUND_ALIAS="$got_alias"
+            break 2
         done
     done
 
-    # ── 2단계: BKS 직접 실패 → JKS/PKCS12 → BKS 변환 ──
+    # ── 2단계: BKS 직접 로드 불가 → JKS/PKCS12 → BKS 변환 ──
     if [ -z "$FOUND_KS" ]; then
-        echo -e "${YELLOW}[INFO] BKS 직접 검증 불가 → 형식 변환 시도...${NC}"
+        echo -e "${YELLOW}[INFO] BKS 직접 로드 불가 → 형식 변환 시도...${NC}"
         for ks in "${CANDIDATES[@]}"; do
             [ -f "$ks" ] || continue
             for pass in "${PASS_LIST[@]}"; do
+                # keytool 로 JKS/PKCS12 읽기 가능 여부 확인
                 local readable=0
-                for fmt in JKS PKCS12 BKS; do
-                    if keytool -list -keystore "$ks" -storepass "$pass" \
-                               -storetype "$fmt" >/dev/null 2>&1; then
-                        readable=1; break
-                    fi
+                for fmt in PKCS12 JKS; do
+                    keytool -list -keystore "$ks" -storepass "$pass" \
+                            -storetype "$fmt" >/dev/null 2>&1 && { readable=1; break; }
                 done
                 [ $readable -eq 1 ] || continue
-                if _ks_conv_bks "$ks" "$pass" "$TMP_BKS" "android"; then
+                # BKS 로 변환
+                if _conv_to_bks "$ks" "$pass" "$TMP_BKS" "android"; then
+                    local got_alias
+                    got_alias=$(_check_bks "$TMP_BKS" "android") || got_alias="$KEYSTORE_ALIAS"
                     cp "$TMP_BKS" "$KEYSTORE_FILE"; rm -f "$TMP_BKS"
                     KEYSTORE_PASS="android"
-                    local label; echo "$ks" | grep -q "kakaotalk-patched" && label="★ 기존 서명 일치" || label="$(basename "$ks")"
-                    echo -e "${GREEN}[OK] $label → BKS 변환 완료${NC}"
-                    echo -e "${GREEN}[OK] Keystore: $KEYSTORE_FILE | Pass: $KEYSTORE_PASS${NC}"
+                    KEYSTORE_ALIAS="${got_alias:-$KEYSTORE_ALIAS}"
+                    local label
+                    echo "$ks" | grep -q "kakaotalk-patched" \
+                        && label="★ 기존 서명 일치 → BKS 변환" \
+                        || label="$(basename "$ks") → BKS 변환"
+                    echo -e "${GREEN}[OK] $label 완료${NC}"
+                    echo -e "${GREEN}[OK] Keystore: $KEYSTORE_FILE  Pass: $KEYSTORE_PASS  Alias: $KEYSTORE_ALIAS${NC}"
                     return 0
                 fi
             done
         done
     fi
 
-    # ── 3단계: 발견된 BKS 복사 ──
+    # ── 3단계: 유효한 BKS 발견 → WORK_DIR 에 복사 ──
     if [ -n "$FOUND_KS" ]; then
         cp "$FOUND_KS" "$KEYSTORE_FILE"
         KEYSTORE_PASS="$FOUND_PASS"
-        local label; echo "$FOUND_KS" | grep -q "kakaotalk-patched" && label="★ 기존 서명 일치 키스토어" || label="$(basename "$FOUND_KS")"
-        echo -e "${GREEN}[OK] Keystore 로드: $label (pass=$FOUND_PASS)${NC}"
+        KEYSTORE_ALIAS="$FOUND_ALIAS"
+        local label
+        echo "$FOUND_KS" | grep -q "kakaotalk-patched" \
+            && label="★ 기존 서명 일치 키스토어" \
+            || label="$(basename "$FOUND_KS")"
+        echo -e "${GREEN}[OK] Keystore 로드: $label${NC}"
         echo -e "${GREEN}[OK] Keystore: $KEYSTORE_FILE${NC}"
-        echo -e "${CYAN}     Alias  : $KEYSTORE_ALIAS${NC}"
+        echo -e "${CYAN}     Pass  : $KEYSTORE_PASS${NC}"
+        echo -e "${CYAN}     Alias : $KEYSTORE_ALIAS${NC}"
         return 0
     fi
 
-    # ── 4단계: GitHub 다운로드 후 재시도 ──
-    echo -e "${YELLOW}[INFO] 로컬에서 유효한 keystore 없음 → GitHub 다운로드...${NC}"
+    # ── 4단계: 로컬 실패 → GitHub 다운로드 후 재검증 ──
+    echo -e "${YELLOW}[INFO] 로컬 keystore 없음 → GitHub 다운로드...${NC}"
     local DL_OK=0
     for url in \
         "$KEYSTORE_SOURCE_URL" \
@@ -297,115 +316,42 @@ setup_keystore() {
 
     if [ $DL_OK -eq 1 ]; then
         for pass in "${PASS_LIST[@]}"; do
-            if _ks_morphe_ok "$KEYSTORE_FILE" "$pass" "$KEYSTORE_ALIAS" || \
-               _ks_bks_ok "$KEYSTORE_FILE" "$pass"; then
-                KEYSTORE_PASS="$pass"
-                echo -e "${GREEN}[OK] GitHub keystore 사용 가능 (pass=$pass)${NC}"
-                echo -e "${GREEN}[OK] Keystore: $KEYSTORE_FILE${NC}"
-                return 0
-            fi
+            local got_alias
+            got_alias=$(_check_bks "$KEYSTORE_FILE" "$pass") || continue
+            [ -n "$got_alias" ] || continue
+            KEYSTORE_PASS="$pass"; KEYSTORE_ALIAS="$got_alias"
+            echo -e "${GREEN}[OK] GitHub keystore 검증 완료 (pass=$pass alias=$got_alias)${NC}"
+            echo -e "${GREEN}[OK] Keystore: $KEYSTORE_FILE${NC}"
+            return 0
         done
         # 변환 시도
         for pass in "${PASS_LIST[@]}"; do
-            if _ks_conv_bks "$KEYSTORE_FILE" "$pass" "$TMP_BKS" "android"; then
+            if _conv_to_bks "$KEYSTORE_FILE" "$pass" "$TMP_BKS" "android"; then
+                local got_alias
+                got_alias=$(_check_bks "$TMP_BKS" "android") || got_alias="$KEYSTORE_ALIAS"
                 cp "$TMP_BKS" "$KEYSTORE_FILE"; rm -f "$TMP_BKS"
-                KEYSTORE_PASS="android"
+                KEYSTORE_PASS="android"; KEYSTORE_ALIAS="${got_alias:-$KEYSTORE_ALIAS}"
                 echo -e "${GREEN}[OK] GitHub keystore → BKS 변환 완료${NC}"
-                echo -e "${GREEN}[OK] Keystore: $KEYSTORE_FILE${NC}"
                 return 0
             fi
         done
     fi
 
-    # ── 5단계: 최후 수단 – Python으로 BKS 생성 ──
-    # Java keytool -storetype BKS 가 실패하는 환경에서
-    # morphe-cli 내장 BC 를 직접 Java 코드로 호출해 BKS 생성
-    echo -e "${YELLOW}[INFO] Java 직접 BKS 생성 시도...${NC}"
-    local JAVA_GEN
-    JAVA_GEN=$(cat <<'JAVA_EOF'
-import java.security.*;
-import java.security.cert.*;
-import java.io.*;
-import java.util.*;
-import java.util.Date;
-import java.math.BigInteger;
-import sun.security.x509.*;
-
-public class GenBKS {
-    public static void main(String[] a) throws Exception {
-        String ksPath = a[0], pass = a[1], alias = a[2];
-        // BC 로드
-        Class<?> bcClass = Class.forName("org.bouncycastle.jce.provider.BouncyCastleProvider");
-        Provider bc = (Provider) bcClass.getDeclaredConstructor().newInstance();
-        Security.addProvider(bc);
-        // RSA 키쌍
-        KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA");
-        kpg.initialize(2048);
-        KeyPair kp = kpg.generateKeyPair();
-        // Self-signed cert
-        X509CertInfo ci = new X509CertInfo();
-        X500Name dn = new X500Name("CN=ReVanced");
-        ci.set(X509CertInfo.VALIDITY, new CertificateValidity(new Date(), new Date(System.currentTimeMillis()+315360000000L)));
-        ci.set(X509CertInfo.SERIAL_NUMBER, new CertificateSerialNumber(new BigInteger(64, new SecureRandom())));
-        ci.set(X509CertInfo.SUBJECT, dn);
-        ci.set(X509CertInfo.ISSUER, dn);
-        ci.set(X509CertInfo.KEY, new CertificateX509Key(kp.getPublic()));
-        ci.set(X509CertInfo.ALGORITHM_ID, new CertificateAlgorithmId(new AlgorithmId(AlgorithmId.sha256WithRSAEncryption_oid)));
-        X509CertImpl cert = new X509CertImpl(ci);
-        cert.sign(kp.getPrivate(), "SHA256withRSA");
-        // BKS keystore 저장
-        KeyStore ks = KeyStore.getInstance("BKS", "BC");
-        ks.load(null, null);
-        ks.setKeyEntry(alias, kp.getPrivate(), pass.toCharArray(), new Certificate[]{cert});
-        try(FileOutputStream fos = new FileOutputStream(ksPath)) {
-            ks.store(fos, pass.toCharArray());
-        }
-        System.out.println("OK");
-    }
-}
-JAVA_EOF
-)
-    local GEN_JAVA="$WORK_DIR/GenBKS.java"
-    echo "$JAVA_GEN" > "$GEN_JAVA"
-    if javac -cp "$MORPHE_CLI_JAR" "$GEN_JAVA" -d "$WORK_DIR" >/dev/null 2>&1 && \
-       java -cp "$MORPHE_CLI_JAR:$WORK_DIR" GenBKS "$KEYSTORE_FILE" "android" "$KEYSTORE_ALIAS" 2>/dev/null | grep -q "OK"; then
-        KEYSTORE_PASS="android"
-        rm -f "$GEN_JAVA" "$WORK_DIR/GenBKS.class"
-        echo -e "${YELLOW}[경고] 새 키로 서명됩니다 – 기존 패치 앱 삭제 후 재설치 필요${NC}"
-        echo -e "${GREEN}[OK] BKS keystore 생성 완료${NC}"
-        echo -e "${GREEN}[OK] Keystore: $KEYSTORE_FILE${NC}"
+    # ── 5단계: 최후 수단 – 새 BKS 생성 (서명 변경 경고) ──
+    echo ""
+    echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${RED}[경고] 기존 서명 키를 찾을 수 없습니다.${NC}"
+    echo -e "${RED}       새 키 생성 → 기존 앱 삭제 후 재설치 필요${NC}"
+    echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${YELLOW}계속하려면 Enter, 중단하려면 Ctrl+C${NC}"
+    read -r
+    if _gen_new_bks; then
+        echo -e "${GREEN}[OK] 새 keystore 생성 완료${NC}"
+        echo -e "${GREEN}[OK] Keystore: $KEYSTORE_FILE  Pass: $KEYSTORE_PASS  Alias: $KEYSTORE_ALIAS${NC}"
         return 0
     fi
-    rm -f "$GEN_JAVA" "$WORK_DIR/GenBKS.class" 2>/dev/null
-
-    # ── 6단계: keytool BKS 생성 (최후) ──
-    echo -e "${YELLOW}[경고] 새 키로 서명됩니다 – 기존 패치 앱 삭제 후 재설치 필요${NC}"
-    rm -f "$KEYSTORE_FILE"
-    keytool -genkeypair -noprompt \
-        -alias     "$KEYSTORE_ALIAS" \
-        -keyalg    RSA -keysize 2048 -validity 10000 \
-        -keystore  "$KEYSTORE_FILE" \
-        -storepass "android" -keypass "android" \
-        -storetype BKS \
-        -provider  org.bouncycastle.jce.provider.BouncyCastleProvider \
-        -providerpath "$MORPHE_CLI_JAR" \
-        -dname "CN=ReVanced,O=ReVanced,C=US" \
-        >/dev/null 2>&1 || \
-    keytool -genkeypair -noprompt \
-        -alias     "$KEYSTORE_ALIAS" \
-        -keyalg    RSA -keysize 2048 -validity 10000 \
-        -keystore  "$KEYSTORE_FILE" \
-        -storepass "android" -keypass "android" \
-        -storetype PKCS12 \
-        -dname "CN=ReVanced,O=ReVanced,C=US" \
-        >/dev/null 2>&1 || {
-        echo -e "${RED}[ERROR] keystore 생성 실패${NC}"; return 1
-    }
-    KEYSTORE_PASS="android"
-    echo -e "${GREEN}[OK] keystore 생성 완료${NC}"
-    echo -e "${GREEN}[OK] Keystore: $KEYSTORE_FILE${NC}"
-    echo -e "${CYAN}     Alias  : $KEYSTORE_ALIAS${NC}"
-    echo -e "${CYAN}     Pass   : $KEYSTORE_PASS${NC}"
+    echo -e "${RED}[ERROR] keystore 준비 완전 실패${NC}"
+    return 1
 }
 
 # ─────────────────────────────────────────
