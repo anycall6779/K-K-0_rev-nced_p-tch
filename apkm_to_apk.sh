@@ -121,11 +121,12 @@ check_dependencies() {
 # → keytool -storetype BKS 가 JDK 환경에 따라 실패하는 문제를 완전히 우회
 # ─────────────────────────────────────────
 
-# VerifyBKS.class + ResignAPK.class 컴파일 (최초 1회)
+# VerifyBKS.class + ResignAPK.class + GetAPKSerial.class 컴파일 (최초 1회)
 _init_bks_checker() {
     local need=0
-    [ -f "$WORK_DIR/VerifyBKS.class" ] || need=1
-    [ -f "$WORK_DIR/ResignAPK.class" ] || need=1
+    [ -f "$WORK_DIR/VerifyBKS.class" ]    || need=1
+    [ -f "$WORK_DIR/ResignAPK.class" ]    || need=1
+    [ -f "$WORK_DIR/GetAPKSerial.class" ] || need=1
     [ $need -eq 0 ] && return 0
 
     cat > "$WORK_DIR/VerifyBKS.java" << 'JEOF'
@@ -180,6 +181,30 @@ public class ResignAPK {
 }
 JEOF
     javac -cp "$MORPHE_CLI_JAR" -d "$WORK_DIR" "$WORK_DIR/ResignAPK.java" >/dev/null 2>&1
+
+    # GetAPKSerial: apksig 로 V1/V2/V3 서명에서 serial 추출 (keytool -jarfile 은 V1 전용이라 부정확)
+    cat > "$WORK_DIR/GetAPKSerial.java" << 'JEOF'
+import java.io.*;
+import java.math.BigInteger;
+import java.security.cert.X509Certificate;
+import java.util.*;
+import com.android.apksig.ApkVerifier;
+public class GetAPKSerial {
+    public static void main(String[] args) throws Exception {
+        ApkVerifier.Result r = new ApkVerifier.Builder(new File(args[0])).build().verify();
+        X509Certificate cert = null;
+        if (r.isVerifiedUsingV3Scheme() && !r.getV3SchemeSigners().isEmpty())
+            cert = r.getV3SchemeSigners().get(0).getCertificate();
+        else if (r.isVerifiedUsingV2Scheme() && !r.getV2SchemeSigners().isEmpty())
+            cert = r.getV2SchemeSigners().get(0).getCertificate();
+        else if (r.isVerifiedUsingV1Scheme() && !r.getV1SchemeSigners().isEmpty())
+            cert = r.getV1SchemeSigners().get(0).getCertificate();
+        if (cert != null)
+            System.out.println(cert.getSerialNumber().toString(16));
+    }
+}
+JEOF
+    javac -cp "$MORPHE_CLI_JAR" -d "$WORK_DIR" "$WORK_DIR/GetAPKSerial.java" >/dev/null 2>&1
 }
 
 # BKS 검증: 성공 시 alias 출력(exit 0), 실패 시 exit 1
@@ -194,21 +219,39 @@ _check_bks() {
 # APK 서명을 올바른 키로 교체 (morphe-cli 가 엉뚱한 키로 서명했을 때)
 _resign_apk() {
     local apk="$1"
-    [ -f "$apk" ] || return 1
-    [ -f "$WORK_DIR/ResignAPK.class" ] || return 1
-    [ -f "$KEYSTORE_FILE" ] || return 1
+    [ -f "$apk" ]                         || { echo -e "${RED}[ERROR] 재서명 대상 없음: $apk${NC}"; return 1; }
+    [ -f "$WORK_DIR/ResignAPK.class" ]     || { echo -e "${RED}[ERROR] ResignAPK.class 없음 (컴파일 실패)${NC}"; return 1; }
+    [ -f "$KEYSTORE_FILE" ]                || { echo -e "${RED}[ERROR] keystore 없음: $KEYSTORE_FILE${NC}"; return 1; }
 
     local tmp="${apk%.apk}_resign_tmp.apk"
+    rm -f "$tmp"
+
     echo -e "${YELLOW}[INFO] 서명 교체 중 (→ my_kakao_key.keystore)...${NC}"
-    if java -cp "$MORPHE_CLI_JAR:$WORK_DIR" ResignAPK \
-           "$apk" "$tmp" "$KEYSTORE_FILE" "$KEYSTORE_PASS" "$KEYSTORE_ALIAS" "$KEYSTORE_PASS" \
-           2>/dev/null | grep -q "OK"; then
+
+    # 파이프 없이 exit code 직접 확인 + stderr 표시
+    local resign_out
+    resign_out=$(java -cp "$MORPHE_CLI_JAR:$WORK_DIR" ResignAPK \
+        "$apk" "$tmp" "$KEYSTORE_FILE" "$KEYSTORE_PASS" "$KEYSTORE_ALIAS" "$KEYSTORE_PASS" \
+        2>&1)
+    local resign_rc=$?
+
+    # tmp 파일이 실제로 생성됐는지 + 최소 크기(1MB) 확인
+    local orig_size tmp_size
+    orig_size=$(stat -c%s "$apk" 2>/dev/null || echo 0)
+    tmp_size=$(stat -c%s "$tmp" 2>/dev/null || echo 0)
+
+    if [ $resign_rc -eq 0 ] && [ "$tmp_size" -gt 1048576 ]; then
+        # 백업 보관 후 교체
+        local bak="${apk%.apk}_before_resign.apk"
+        cp "$apk" "$bak" 2>/dev/null || true
         mv "$tmp" "$apk"
-        echo -e "${GREEN}[OK] 서명 교체 완료${NC}"
+        echo -e "${GREEN}[OK] 서명 교체 완료 (원본 백업: $(basename "$bak"))${NC}"
         return 0
     fi
+
+    echo -e "${RED}[ERROR] 서명 교체 실패 (rc=$resign_rc, tmp_size=${tmp_size}B)${NC}"
+    echo -e "${RED}        출력: $resign_out${NC}"
     rm -f "$tmp"
-    echo -e "${RED}[WARN] 서명 교체 실패 (javac 미설치 가능성)${NC}"
     return 1
 }
 
@@ -597,7 +640,7 @@ select_patches() {
         return 0
     fi
 
-    # 패치 이름 파싱: "숫자. 패치명 - 설명" 형식
+    # 파싱: "  N. 패치명" 또는 "  N. 패치명 - 설명" 형식
     local PATCH_NAMES=()
     local PATCH_INDICES=()
     while IFS= read -r line; do
@@ -605,65 +648,89 @@ select_patches() {
         if [[ "$line" =~ ^[[:space:]]*([0-9]+)\.[[:space:]]+(.+)$ ]]; then
             idx="${BASH_REMATCH[1]}"
             name="${BASH_REMATCH[2]}"
-            # 설명 부분(" - ...") 제거하여 깔끔하게 표시
-            name="${name%% - *}"
+            name="${name%% - *}"   # " - 설명" 제거
+            name="${name%%  *}"    # 더블스페이스 이후 제거
+            name="${name%"${name##*[![:space:]]}"}"  # 우측 공백 trim
             PATCH_INDICES+=("$idx")
             PATCH_NAMES+=("$name")
         fi
     done <<< "$LIST_OUT"
 
     if [ ${#PATCH_NAMES[@]} -eq 0 ]; then
-        echo -e "${YELLOW}[INFO] 파싱된 패치 없음 → 전체 적용${NC}"
+        echo -e "${YELLOW}[INFO] 패치 파싱 불가 → 전체 적용${NC}"
         return 0
     fi
 
-    echo -e "${CYAN}사용 가능한 패치 목록 (${PKG_NAME}):${NC}"
+    local total=${#PATCH_NAMES[@]}
+
+    # ── 체크리스트 출력 (전체 [✓] 상태) ──
+    echo -e "${CYAN}패치 목록 (${PKG_NAME}) — ${total}개 전체 선택됨:${NC}"
     echo ""
     for i in "${!PATCH_NAMES[@]}"; do
-        printf "  ${GREEN}%3s.${NC} %s\n" "${PATCH_INDICES[$i]}" "${PATCH_NAMES[$i]}"
+        printf "  ${GREEN}[✓] %3s.${NC} %s\n" "${PATCH_INDICES[$i]}" "${PATCH_NAMES[$i]}"
     done
     echo ""
-
-    echo -e "${YELLOW}적용 방식을 선택하세요:${NC}"
-    echo -e "  ${GREEN}1.${NC} 전체 패치 적용 (기본값 – Enter)"
-    echo -e "  ${BLUE}2.${NC} 일부 패치 비활성화  (나머지 전부 적용)"
-    echo -e "  ${BLUE}3.${NC} 선택한 패치만 활성화 (나머지 전부 비활성)"
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "  ${GREEN}Enter${NC}          전체 패치 적용 (기본값)"
+    echo -e "  ${BLUE}1,3,5${NC}          해당 번호를 [✗] 비활성화 (나머지 전부 적용)"
+    echo -e "  ${BLUE}only 1,3,5${NC}     해당 번호만 [✓] 활성화  (나머지 전부 비활성)"
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
-    read -r -p "> " MODE_SEL
-    [ -z "$MODE_SEL" ] && MODE_SEL="1"
+    read -r -p "> " PATCH_SEL
 
-    case "$MODE_SEL" in
-        2)
-            echo ""
-            echo -e "${YELLOW}비활성화할 패치 번호를 입력하세요 (쉼표로 구분, 예: 1,3,5):${NC}"
-            read -r -p "> " DISABLE_INPUT
-            local count=0
-            for num in $(echo "$DISABLE_INPUT" | tr ',' ' '); do
-                num="${num// /}"
-                [[ "$num" =~ ^[0-9]+$ ]] || continue
-                PATCH_EXTRA_ARGS+=("--di=$num")
-                (( count++ ))
+    # 빈 입력 → 전체 적용
+    if [ -z "${PATCH_SEL// /}" ]; then
+        echo -e "${GREEN}[OK] 전체 ${total}개 패치 적용${NC}"
+        return 0
+    fi
+
+    # "only N,M,..." → 해당 패치만 활성화
+    if [[ "${PATCH_SEL,,}" =~ ^only[[:space:],]* ]]; then
+        local nums="${PATCH_SEL}"
+        nums="${nums#[Oo][Nn][Ll][Yy]}"   # "only" 제거
+        nums="${nums#[[:space:]]}"
+        PATCH_EXTRA_ARGS+=("--exclusive")
+        local count=0
+        for num in $(echo "$nums" | tr ',' ' '); do
+            num="${num//[^0-9]/}"
+            [ -n "$num" ] || continue
+            PATCH_EXTRA_ARGS+=("--ei=$num")
+            (( count++ ))
+        done
+        echo ""
+        echo -e "${CYAN}최종 선택:${NC}"
+        for i in "${!PATCH_NAMES[@]}"; do
+            local mark="${RED}[✗]${NC}"
+            for arg in "${PATCH_EXTRA_ARGS[@]}"; do
+                [[ "$arg" == "--ei=${PATCH_INDICES[$i]}" ]] && mark="${GREEN}[✓]${NC}" && break
             done
-            echo -e "${GREEN}[OK] ${count}개 패치 비활성화 예약${NC}"
-            ;;
-        3)
-            echo ""
-            echo -e "${YELLOW}활성화할 패치 번호를 입력하세요 (쉼표로 구분, 예: 1,3,5):${NC}"
-            read -r -p "> " ENABLE_INPUT
-            PATCH_EXTRA_ARGS+=("--exclusive")
-            local count=0
-            for num in $(echo "$ENABLE_INPUT" | tr ',' ' '); do
-                num="${num// /}"
-                [[ "$num" =~ ^[0-9]+$ ]] || continue
-                PATCH_EXTRA_ARGS+=("--ei=$num")
-                (( count++ ))
-            done
-            echo -e "${GREEN}[OK] ${count}개 패치만 활성화 예약 (나머지 비활성)${NC}"
-            ;;
-        *)
-            echo -e "${GREEN}[OK] 전체 패치 적용${NC}"
-            ;;
-    esac
+            printf "  %b %3s. %s\n" "$mark" "${PATCH_INDICES[$i]}" "${PATCH_NAMES[$i]}"
+        done
+        echo ""
+        echo -e "${GREEN}[OK] ${count}개 패치만 활성화 (나머지 $((total - count))개 비활성)${NC}"
+        return 0
+    fi
+
+    # "N,M,..." → 해당 패치 비활성화
+    local DISABLE_SET=()
+    for num in $(echo "$PATCH_SEL" | tr ',' ' '); do
+        num="${num//[^0-9]/}"
+        [ -n "$num" ] || continue
+        PATCH_EXTRA_ARGS+=("--di=$num")
+        DISABLE_SET+=("$num")
+    done
+    local count=${#DISABLE_SET[@]}
+    echo ""
+    echo -e "${CYAN}최종 선택:${NC}"
+    for i in "${!PATCH_NAMES[@]}"; do
+        local mark="${GREEN}[✓]${NC}"
+        for d in "${DISABLE_SET[@]}"; do
+            [[ "$d" == "${PATCH_INDICES[$i]}" ]] && mark="${RED}[✗]${NC}" && break
+        done
+        printf "  %b %3s. %s\n" "$mark" "${PATCH_INDICES[$i]}" "${PATCH_NAMES[$i]}"
+    done
+    echo ""
+    echo -e "${GREEN}[OK] ${count}개 비활성화, $((total - count))개 적용 예정${NC}"
 }
 
 # ─────────────────────────────────────────
@@ -711,15 +778,41 @@ run_patch() {
 
     # 결과 확인
     if [ -f "$OUTPUT_APK" ]; then
-        # ── 서명 검증 후 필요시 재서명 ──
-        local ACTUAL_SERIAL
-        ACTUAL_SERIAL=$(keytool -printcert -jarfile "$OUTPUT_APK" 2>/dev/null \
-            | grep -i 'serial\|일련' | grep -oP '[0-9a-f]{8,}' | head -n1) || ACTUAL_SERIAL=""
+        # ── apksig(GetAPKSerial) 로 V1/V2/V3 서명에서 serial 추출 ──
+        local ACTUAL_SERIAL=""
+        if [ -f "$WORK_DIR/GetAPKSerial.class" ]; then
+            ACTUAL_SERIAL=$(java -cp "$MORPHE_CLI_JAR:$WORK_DIR" GetAPKSerial "$OUTPUT_APK" 2>/dev/null) || ACTUAL_SERIAL=""
+        fi
+        # fallback: keytool (V1 있을 때만 동작)
+        if [ -z "$ACTUAL_SERIAL" ]; then
+            ACTUAL_SERIAL=$(keytool -printcert -jarfile "$OUTPUT_APK" 2>/dev/null \
+                | grep -i 'serial\|일련' | grep -oP '[0-9a-f]{8,}' | head -n1) || ACTUAL_SERIAL=""
+        fi
+
         local WANT_SERIAL="19f687f04ccebf6b"
-        if [ "$ACTUAL_SERIAL" != "$WANT_SERIAL" ]; then
-            echo -e "${YELLOW}[INFO] 서명 serial 불일치 ($ACTUAL_SERIAL) → 재서명 시도...${NC}"
+        echo -e "${CYAN}[INFO] APK 서명 serial: ${ACTUAL_SERIAL:-검출불가}${NC}"
+
+        if [ -n "$ACTUAL_SERIAL" ] && [ "$ACTUAL_SERIAL" != "$WANT_SERIAL" ]; then
+            echo -e "${YELLOW}[WARN] serial 불일치 ($ACTUAL_SERIAL ≠ $WANT_SERIAL) → 재서명 시도...${NC}"
+            if _resign_apk "$OUTPUT_APK"; then
+                # 재서명 후 serial 재확인
+                local NEW_SERIAL
+                NEW_SERIAL=$(java -cp "$MORPHE_CLI_JAR:$WORK_DIR" GetAPKSerial "$OUTPUT_APK" 2>/dev/null) || NEW_SERIAL=""
+                if [ "$NEW_SERIAL" = "$WANT_SERIAL" ]; then
+                    echo -e "${GREEN}[OK] 서명 확인 완료: $NEW_SERIAL ✓${NC}"
+                else
+                    echo -e "${RED}[ERROR] 재서명 후에도 serial 불일치: ${NEW_SERIAL:-검출불가}${NC}"
+                    echo -e "${RED}        설치 시 '앱 서명 불일치' 오류가 발생할 수 있습니다.${NC}"
+                fi
+            else
+                echo -e "${RED}[ERROR] 재서명 실패 – 업데이트 설치 불가${NC}"
+            fi
+        elif [ "$ACTUAL_SERIAL" = "$WANT_SERIAL" ]; then
+            echo -e "${GREEN}[OK] 서명 일치 확인: $ACTUAL_SERIAL ✓${NC}"
+        else
+            echo -e "${YELLOW}[WARN] serial 검출 불가 – 재서명 강제 실행...${NC}"
             _resign_apk "$OUTPUT_APK" || \
-                echo -e "${YELLOW}[WARN] 재서명 실패 – 서명이 다를 수 있음${NC}"
+                echo -e "${RED}[ERROR] 재서명 실패 – 업데이트 설치 불가${NC}"
         fi
 
         local SIZE
