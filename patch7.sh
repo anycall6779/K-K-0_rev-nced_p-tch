@@ -25,13 +25,13 @@ GITHUB_API_URL="https://api.github.com/repos/$GITHUB_REPO/releases"
 
 # 서명 키스토어 설정
 # KakaoTalk_Patched_unclone.apk는 GitHub의 my_kakao_key.keystore로 서명됨
-# 업데이트가 되려면 반드시 동일한 원본 키를 사용해야 함
+# 실제 형식: BKS-V2 / alias: 'ReVanced Key' / password: 빈 문자열
 GITHUB_KEYSTORE_URL="https://github.com/anycall6779/K-K-0_rev-nced_p-tch/raw/refs/heads/main/my_kakao_key.keystore"
-ORIG_KEYSTORE_FILE="$PATCH_SCRIPT_DIR/my_kakao_key.keystore"   # GitHub 원본 (JKS/PKCS12)
-KEYSTORE_FILE="$PATCH_SCRIPT_DIR/kakao_sign_bks.keystore"        # BKS 변환본 (morphe-cli용)
-KEY_ALIAS="revanced"
-KEY_PASS="android"
-STORE_PASS="android"
+ORIG_KEYSTORE_FILE="$PATCH_SCRIPT_DIR/my_kakao_key.keystore"   # GitHub 원본 (BKS-V2)
+KEYSTORE_FILE="$PATCH_SCRIPT_DIR/kakao_sign_bks.keystore"        # 최종 사용 파일
+KEY_ALIAS="ReVanced Key"
+KEY_PASS=""             # 빈 문자열
+STORE_PASS=""           # 빈 문자열
 
 MORPHE_CLI_JAR="$PATCH_SCRIPT_DIR/morphe-cli.jar"
 MPP_FILE="$BASE_DIR/patches-fixed.mpp"
@@ -316,8 +316,8 @@ run_patch() {
         local DETECTED_TYPE=""
         local DETECTED_PASS=""
 
-        for TRY_PASS in "android" "" "kakao" "kakaotalk" "1234"; do
-            for TRY_TYPE in JKS PKCS12 BKS; do
+        for TRY_PASS in "" "android" "test" "kakao" "kakaotalk" "1234"; do
+            for TRY_TYPE in BKS JKS PKCS12; do
                 local EXTRA_ARGS=""
                 [ "$TRY_TYPE" = "BKS" ] && \
                     EXTRA_ARGS="-provider org.bouncycastle.jce.provider.BouncyCastleProvider -providerpath $BC_JAR"
@@ -336,8 +336,15 @@ run_patch() {
 
         if [ -z "$DETECTED_TYPE" ]; then
             echo -e "${RED}[ERROR] 키스토어 형식/비밀번호를 자동 감지할 수 없습니다.${NC}"
-            echo -e "${YELLOW}[TIP] 아래 명령어로 수동 확인 후 스크립트 34번줄 STORE_PASS를 수정하세요:${NC}"
-            echo -e "  keytool -list -keystore $ORIG_KEYSTORE_FILE -storepass YOUR_PASSWORD"
+            echo -e "${YELLOW}━━━━━━━ 진단 정보 ━━━━━━━${NC}"
+            echo -e "${BLUE}파일 크기: $(wc -c < "$ORIG_KEYSTORE_FILE") bytes${NC}"
+            echo -e "${BLUE}파일 헤더(hex): $(xxd "$ORIG_KEYSTORE_FILE" 2>/dev/null | head -2 || od -A x -t x1z "$ORIG_KEYSTORE_FILE" | head -2)${NC}"
+            echo -e "${YELLOW}─ JKS 시도 결과:${NC}"
+            keytool -list -keystore "$ORIG_KEYSTORE_FILE" -storetype JKS -storepass android 2>&1 | head -5
+            echo -e "${YELLOW}─ PKCS12 시도 결과:${NC}"
+            keytool -list -keystore "$ORIG_KEYSTORE_FILE" -storetype PKCS12 -storepass android 2>&1 | head -5
+            echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+            echo -e "${YELLOW}위 진단 정보를 알려주시면 해결해드리겠습니다.${NC}"
             return 1
         fi
         echo -e "${GREEN}[OK] 감지된 형식: $DETECTED_TYPE (pass: '${DETECTED_PASS:-빈값}')${NC}"
@@ -568,9 +575,9 @@ def build_cmd(cli_jar, mpp_file, apk_path, out_apk,
         else:
             cmd.extend(['-e', str(val)])
     if keystore:  cmd.extend(['--keystore', keystore])
-    if ks_pass:   cmd.extend(['--keystore-password', ks_pass])
+    if ks_pass is not None:   cmd.extend(['--keystore-password', ks_pass])
     if key_alias: cmd.extend(['--keystore-entry-alias', key_alias])
-    if key_pass:  cmd.extend(['--keystore-entry-password', key_pass])
+    if key_pass is not None:  cmd.extend(['--keystore-entry-password', key_pass])
     cmd.extend(['-o', out_apk, apk_path])
     return cmd
 
