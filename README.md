@@ -84,3 +84,12 @@ apkm to apk
 ```
 curl -L -o ~/apkm_to_apk.sh https://raw.githubusercontent.com/anycall6779/K-K-0_rev-nced_p-tch/main/apkm_to_apk.sh && bash ~/apkm_to_apk.sh
 ```
+
+mpp patch7 for local
+```
+# 1. 실행 권한 부여
+chmod +x /storage/emulated/0/Download/patch7.sh
+
+# 2. 실행
+bash /storage/emulated/0/Download/patch7.sh
+```
