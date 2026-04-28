@@ -300,57 +300,92 @@ run_patch() {
     if [ $KS_VALID -eq 1 ]; then
         echo -e "${GREEN}[OK] 기존 BKS 키스토어 재사용 (업데이트 서명 일관성 유지): $KEYSTORE_FILE${NC}"
     else
-        # 3) GitHub에서 원본 키스토어 다운로드 (KakaoTalk_Patched_unclone.apk에 사용된 키)
+        # 3) GitHub에서 원본 키스토어 다운로드
         echo -e "${BLUE}[INFO] GitHub에서 원본 키스토어 다운로드 중...${NC}"
-        echo -e "${YELLOW}[INFO] (이 키가 설치된 APK와 동일한 서명 키입니다)${NC}"
         curl -L -s -o "$ORIG_KEYSTORE_FILE" "$GITHUB_KEYSTORE_URL" || {
             echo -e "${RED}[ERROR] 원본 키스토어 다운로드 실패!${NC}"
             return 1
         }
-
         if [ ! -s "$ORIG_KEYSTORE_FILE" ]; then
             echo -e "${RED}[ERROR] 다운로드된 키스토어 파일이 비어 있습니다.${NC}"
             return 1
         fi
-        echo -e "${GREEN}[OK] 원본 키스토어 다운로드 완료: $ORIG_KEYSTORE_FILE${NC}"
+        echo -e "${GREEN}[OK] 원본 키스토어 다운로드 완료${NC}"
 
-        # 4) 원본이 이미 BKS인지 확인
-        local ORIG_IS_BKS=0
-        keytool -list \
-            -keystore "$ORIG_KEYSTORE_FILE" \
-            -storetype BKS \
-            -provider org.bouncycastle.jce.provider.BouncyCastleProvider \
-            -providerpath "$BC_JAR" \
-            -storepass "$STORE_PASS" &>/dev/null && ORIG_IS_BKS=1
+        # 4) storetype + password 자동 감지 (alias는 지정 안 함 → 전체 임포트)
+        local DETECTED_TYPE=""
+        local DETECTED_PASS=""
 
-        if [ $ORIG_IS_BKS -eq 1 ]; then
-            # 원본이 이미 BKS → 그대로 사용
-            echo -e "${GREEN}[OK] 원본 키스토어가 이미 BKS 형식입니다. 직접 사용합니다.${NC}"
+        for TRY_PASS in "android" "" "kakao" "kakaotalk" "1234"; do
+            for TRY_TYPE in JKS PKCS12 BKS; do
+                local EXTRA_ARGS=""
+                [ "$TRY_TYPE" = "BKS" ] && \
+                    EXTRA_ARGS="-provider org.bouncycastle.jce.provider.BouncyCastleProvider -providerpath $BC_JAR"
+                # shellcheck disable=SC2086
+                keytool -list \
+                    -keystore "$ORIG_KEYSTORE_FILE" \
+                    -storetype "$TRY_TYPE" \
+                    $EXTRA_ARGS \
+                    -storepass "$TRY_PASS" &>/dev/null && {
+                    DETECTED_TYPE="$TRY_TYPE"
+                    DETECTED_PASS="$TRY_PASS"
+                    break 2
+                }
+            done
+        done
+
+        if [ -z "$DETECTED_TYPE" ]; then
+            echo -e "${RED}[ERROR] 키스토어 형식/비밀번호를 자동 감지할 수 없습니다.${NC}"
+            echo -e "${YELLOW}[TIP] 아래 명령어로 수동 확인 후 스크립트 34번줄 STORE_PASS를 수정하세요:${NC}"
+            echo -e "  keytool -list -keystore $ORIG_KEYSTORE_FILE -storepass YOUR_PASSWORD"
+            return 1
+        fi
+        echo -e "${GREEN}[OK] 감지된 형식: $DETECTED_TYPE (pass: '${DETECTED_PASS:-빈값}')${NC}"
+
+        local TEMP_P12="$PATCH_SCRIPT_DIR/temp_kakao.p12"
+        rm -f "$TEMP_P12" "$KEYSTORE_FILE"
+
+        if [ "$DETECTED_TYPE" = "BKS" ]; then
+            # 이미 BKS → 그대로 복사
+            echo -e "${GREEN}[OK] 원본이 이미 BKS 형식. 직접 사용합니다.${NC}"
             cp -f "$ORIG_KEYSTORE_FILE" "$KEYSTORE_FILE"
         else
-            # 5) JKS/PKCS12 → PKCS12 임시 변환 → BKS 변환
-            echo -e "${YELLOW}[INFO] 원본 키스토어를 BKS 형식으로 변환 중...${NC}"
-            local TEMP_P12="$PATCH_SCRIPT_DIR/temp_kakao.p12"
-            rm -f "$TEMP_P12" "$KEYSTORE_FILE"
-
-            # Step A: 원본 → PKCS12
+            # 5) alias 지정 없이 전체 임포트 → PKCS12 (alias 문제 우회)
+            echo -e "${YELLOW}[INFO] $DETECTED_TYPE → PKCS12 변환 중 (전체 임포트)...${NC}"
             keytool -importkeystore \
                 -srckeystore "$ORIG_KEYSTORE_FILE" \
+                -srcstoretype "$DETECTED_TYPE" \
                 -destkeystore "$TEMP_P12" \
                 -deststoretype PKCS12 \
-                -srcalias "$KEY_ALIAS" \
-                -destalias "$KEY_ALIAS" \
-                -srcstorepass "$STORE_PASS" \
+                -srcstorepass "$DETECTED_PASS" \
                 -deststorepass "$STORE_PASS" \
-                -srckeypass "$KEY_PASS" \
-                -destkeypass "$KEY_PASS" \
                 -noprompt &>/dev/null || {
-                echo -e "${RED}[ERROR] PKCS12 변환 실패! alias/password를 확인하세요.${NC}"
+                echo -e "${RED}[ERROR] PKCS12 변환 실패!${NC}"
                 rm -f "$TEMP_P12"
                 return 1
             }
+            echo -e "${GREEN}[OK] PKCS12 변환 완료${NC}"
 
-            # Step B: PKCS12 → BKS
+            # 6) PKCS12에서 alias 자동 추출
+            local LIST_P12
+            LIST_P12=$(keytool -list \
+                -keystore "$TEMP_P12" \
+                -storetype PKCS12 \
+                -storepass "$STORE_PASS" 2>/dev/null)
+            local AUTO_ALIAS
+            AUTO_ALIAS=$(echo "$LIST_P12" \
+                | grep -m1 'PrivateKeyEntry\|trustedCertEntry' \
+                | awk -F',' '{print $1}' | sed 's/^[[:space:]]*//')
+            [ -z "$AUTO_ALIAS" ] && \
+                AUTO_ALIAS=$(echo "$LIST_P12" | grep -m1 -E '^[a-zA-Z]' | cut -d, -f1 | sed 's/^[[:space:]]*//')
+            echo -e "${GREEN}[OK] 추출된 alias: '${AUTO_ALIAS:-자동실패→전체임포트}'${NC}"
+
+            # 7) PKCS12 → BKS (alias 있으면 지정, 없으면 전체 임포트)
+            echo -e "${YELLOW}[INFO] PKCS12 → BKS 변환 중...${NC}"
+            local ALIAS_ARGS=""
+            [ -n "$AUTO_ALIAS" ] && \
+                ALIAS_ARGS="-srcalias $AUTO_ALIAS -destalias $AUTO_ALIAS"
+            # shellcheck disable=SC2086
             keytool -importkeystore \
                 -srckeystore "$TEMP_P12" \
                 -srcstoretype PKCS12 \
@@ -358,32 +393,47 @@ run_patch() {
                 -deststoretype BKS \
                 -provider org.bouncycastle.jce.provider.BouncyCastleProvider \
                 -providerpath "$BC_JAR" \
-                -srcalias "$KEY_ALIAS" \
-                -destalias "$KEY_ALIAS" \
+                $ALIAS_ARGS \
                 -srcstorepass "$STORE_PASS" \
                 -deststorepass "$STORE_PASS" \
-                -srckeypass "$KEY_PASS" \
-                -destkeypass "$KEY_PASS" \
                 -noprompt &>/dev/null || {
                 echo -e "${RED}[ERROR] BKS 변환 실패!${NC}"
                 rm -f "$TEMP_P12" "$KEYSTORE_FILE"
                 return 1
             }
             rm -f "$TEMP_P12"
-            echo -e "${GREEN}[OK] BKS 변환 완료: $KEYSTORE_FILE${NC}"
+            # KEY_ALIAS 업데이트
+            [ -n "$AUTO_ALIAS" ] && KEY_ALIAS="$AUTO_ALIAS"
+            echo -e "${GREEN}[OK] BKS 변환 완료 (alias: $KEY_ALIAS)${NC}"
         fi
 
-        # 6) 최종 BKS 유효성 검증
+        # 8) 최종 BKS 유효성 검증
         if ! keytool -list \
                 -keystore "$KEYSTORE_FILE" \
                 -storetype BKS \
                 -provider org.bouncycastle.jce.provider.BouncyCastleProvider \
                 -providerpath "$BC_JAR" \
                 -storepass "$STORE_PASS" &>/dev/null; then
-            echo -e "${RED}[ERROR] BKS 키스토어 검증 실패! 변환이 올바르지 않습니다.${NC}"
+            echo -e "${RED}[ERROR] BKS 최종 검증 실패!${NC}"
+            rm -f "$KEYSTORE_FILE"
             return 1
         fi
-        echo -e "${GREEN}[OK] BKS 키스토어 검증 완료. 설치된 APK와 동일한 서명키로 패치합니다.${NC}"
+
+        # 9) BKS에서 alias 재확인 (BKS 직접 복사 케이스 대비)
+        local BKS_LIST
+        BKS_LIST=$(keytool -list \
+            -keystore "$KEYSTORE_FILE" \
+            -storetype BKS \
+            -provider org.bouncycastle.jce.provider.BouncyCastleProvider \
+            -providerpath "$BC_JAR" \
+            -storepass "$STORE_PASS" 2>/dev/null)
+        local BKS_ALIAS
+        BKS_ALIAS=$(echo "$BKS_LIST" \
+            | grep -m1 'PrivateKeyEntry\|trustedCertEntry' \
+            | awk -F',' '{print $1}' | sed 's/^[[:space:]]*//')
+        [ -n "$BKS_ALIAS" ] && KEY_ALIAS="$BKS_ALIAS"
+
+        echo -e "${GREEN}[OK] 서명 준비 완료. 동일 키로 패치합니다. (alias: $KEY_ALIAS)${NC}"
     fi
 
     # 작업 디렉토리 초기화
