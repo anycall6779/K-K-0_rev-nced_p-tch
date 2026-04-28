@@ -259,17 +259,38 @@ run_patch() {
         pip install questionary -q || pip3 install questionary -q
     fi
 
-    # 키스토어 유효성 검사 후 없거나 손상된 경우 keytool로 직접 생성
+    # morphe-cli는 BouncyCastle BKS 형식 키스토어 필요
+    # BC provider JAR 준비
+    local BC_JAR="$PATCH_SCRIPT_DIR/bcprov.jar"
+    if [ ! -f "$BC_JAR" ]; then
+        echo -e "${YELLOW}[INFO] BouncyCastle 프로바이더 다운로드 중...${NC}"
+        curl -L -s -o "$BC_JAR" \
+            "https://repo1.maven.org/maven2/org/bouncycastle/bcprov-jdk18on/1.78.1/bcprov-jdk18on-1.78.1.jar" || {
+            echo -e "${RED}[ERROR] BC 프로바이더 다운로드 실패${NC}"
+            return 1
+        }
+        echo -e "${GREEN}[OK] BouncyCastle 프로바이더 준비 완료${NC}"
+    fi
+
+    # BKS 키스토어 유효성 검사
     local KS_VALID=0
     if [ -f "$KEYSTORE_FILE" ]; then
-        keytool -list -keystore "$KEYSTORE_FILE" -storepass "android" &>/dev/null && KS_VALID=1
+        keytool -list \
+            -keystore "$KEYSTORE_FILE" \
+            -storetype BKS \
+            -provider org.bouncycastle.jce.provider.BouncyCastleProvider \
+            -providerpath "$BC_JAR" \
+            -storepass "android" &>/dev/null && KS_VALID=1
     fi
 
     if [ $KS_VALID -eq 0 ]; then
-        echo -e "${YELLOW}[INFO] 키스토어 생성 중 (keytool)...${NC}"
+        echo -e "${YELLOW}[INFO] BKS 형식 키스토어 생성 중...${NC}"
         rm -f "$KEYSTORE_FILE"
         keytool -genkey -v \
             -keystore "$KEYSTORE_FILE" \
+            -storetype BKS \
+            -provider org.bouncycastle.jce.provider.BouncyCastleProvider \
+            -providerpath "$BC_JAR" \
             -alias "revanced" \
             -keyalg RSA \
             -keysize 2048 \
@@ -278,12 +299,12 @@ run_patch() {
             -keypass "android" \
             -dname "CN=ReVanced, OU=ReVanced, O=ReVanced, L=ReVanced, S=ReVanced, C=US" \
             &>/dev/null || {
-            echo -e "${RED}[ERROR] 키스토어 생성 실패! (keytool이 설치됐는지 확인: pkg install openjdk-21)${NC}"
+            echo -e "${RED}[ERROR] BKS 키스토어 생성 실패!${NC}"
             return 1
         }
-        echo -e "${GREEN}[OK] 키스토어 생성 완료: $KEYSTORE_FILE${NC}"
+        echo -e "${GREEN}[OK] BKS 키스토어 생성 완료: $KEYSTORE_FILE${NC}"
     else
-        echo -e "${GREEN}[OK] 기존 키스토어 사용: $KEYSTORE_FILE${NC}"
+        echo -e "${GREEN}[OK] 기존 BKS 키스토어 사용: $KEYSTORE_FILE${NC}"
     fi
 
     # 작업 디렉토리 초기화
