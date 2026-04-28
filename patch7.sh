@@ -299,7 +299,8 @@ def check_java():
 
 def list_patches(cli_jar, mpp_file):
     cmd = ['java', '-jar', cli_jar, 'list-patches',
-           '--with-packages', '--with-versions', '--with-options', mpp_file]
+           f'--patches={mpp_file}',
+           '--with-packages', '--with-versions', '--with-options']
     print(f"[INFO] 패치 목록 조회 중...")
     proc = subprocess.run(cmd, capture_output=True, text=True, errors='replace')
     if proc.returncode != 0:
@@ -390,7 +391,8 @@ def interactive_select(entries):
 
 def build_cmd(cli_jar, mpp_file, apk_path, out_apk,
               selected, keystore, ks_pass, key_alias, key_pass):
-    cmd = ['java', '-jar', cli_jar, 'patch', '-p', mpp_file, '--exclusive']
+    cmd = ['java', '-jar', cli_jar, 'patch',
+           f'--patches={mpp_file}', '--exclusive']
     for kind, val in selected:
         if kind == 'idx':
             cmd.extend(['--ei', str(val)])
