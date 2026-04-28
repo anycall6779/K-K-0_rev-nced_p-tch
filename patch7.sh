@@ -19,11 +19,19 @@ PATCH_SCRIPT_DIR="$HOME/morphe-build-script"
 MERGED_APK_PATH="$HOME/Downloads/KakaoTalk_Merged.apk"
 EDITOR_JAR="$BASE_DIR/APKEditor-1.4.5.jar"
 
-# GitHub Setup for Keystore & Patches
+# GitHub Setup for Patches
 GITHUB_REPO="anycall6779/K-K-0_rev-nced_p-tch"
 GITHUB_API_URL="https://api.github.com/repos/$GITHUB_REPO/releases"
-KEYSTORE_URL="https://github.com/anycall6779/K-K-0_rev-nced_p-tch/raw/refs/heads/main/my_kakao_key.keystore"
-KEYSTORE_FILE="$PATCH_SCRIPT_DIR/my_kakao_key.keystore"
+
+# 키스토어 설정 (기존 설치 APK와 동일한 서명 유지)
+KEYSTORE_FILE="$PATCH_SCRIPT_DIR/kakao_sign.keystore"
+KEY_ALIAS="kakao"
+KEY_PASS="android"
+STORE_PASS="android"
+
+# 기존 설치된(서명된) APK 경로 - 이 APK의 서명을 추출해 동일하게 서명합니다
+REF_SIGNED_APK="$BASE_DIR/KakaoTalk_Patched_unclone.apk"
+
 MORPHE_CLI_JAR="$PATCH_SCRIPT_DIR/morphe-cli.jar"
 MPP_FILE="$BASE_DIR/patches-fixed.mpp"
 
@@ -259,8 +267,12 @@ run_patch() {
         pip install questionary -q || pip3 install questionary -q
     fi
 
-    # morphe-cli는 BouncyCastle BKS 형식 키스토어 필요
-    # BC provider JAR 준비
+    # ─────────────────────────────────────────────────────────────
+    # morphe-cli는 반드시 BKS 형식 키스토어를 요구함
+    # 최초 1회만 생성 후 영구 보존 → 업데이트 시 서명 일관성 유지
+    # ─────────────────────────────────────────────────────────────
+
+    # BC provider JAR 준비 (BKS 형식 사용에 필수)
     local BC_JAR="$PATCH_SCRIPT_DIR/bcprov.jar"
     if [ ! -f "$BC_JAR" ]; then
         echo -e "${YELLOW}[INFO] BouncyCastle 프로바이더 다운로드 중...${NC}"
@@ -272,7 +284,7 @@ run_patch() {
         echo -e "${GREEN}[OK] BouncyCastle 프로바이더 준비 완료${NC}"
     fi
 
-    # BKS 키스토어 유효성 검사
+    # BKS 키스토어 유효성 확인 (유효하면 재사용, 절대 재생성 안 함)
     local KS_VALID=0
     if [ -f "$KEYSTORE_FILE" ]; then
         keytool -list \
@@ -280,31 +292,43 @@ run_patch() {
             -storetype BKS \
             -provider org.bouncycastle.jce.provider.BouncyCastleProvider \
             -providerpath "$BC_JAR" \
-            -storepass "android" &>/dev/null && KS_VALID=1
+            -storepass "$STORE_PASS" &>/dev/null && KS_VALID=1
     fi
 
-    if [ $KS_VALID -eq 0 ]; then
-        echo -e "${YELLOW}[INFO] BKS 형식 키스토어 생성 중...${NC}"
-        rm -f "$KEYSTORE_FILE"
+    if [ $KS_VALID -eq 1 ]; then
+        # ★ 유효한 키스토어 존재 → 재사용 (업데이트 서명 일관성 보장)
+        echo -e "${GREEN}[OK] 기존 BKS 키스토어 재사용 (서명 일관성 유지): $KEYSTORE_FILE${NC}"
+    else
+        # 키스토어 없거나 손상 → 최초 1회만 BKS 생성
+        [ -f "$KEYSTORE_FILE" ] && rm -f "$KEYSTORE_FILE"
+
+        if [ -f "$REF_SIGNED_APK" ]; then
+            echo -e "${BLUE}[INFO] 기준 APK 확인됨: $REF_SIGNED_APK${NC}"
+            echo -e "${YELLOW}[INFO] 참고: APK에서 개인키 추출 불가. BKS 키스토어를 새로 생성합니다.${NC}"
+        else
+            echo -e "${YELLOW}[WARN] 기준 APK 없음: $REF_SIGNED_APK${NC}"
+        fi
+        echo -e "${YELLOW}[INFO] 이 키스토어는 영구 보존되어 이후 모든 패치에 재사용됩니다.${NC}"
+
+        echo -e "${BLUE}[INFO] BKS 키스토어 생성 중 (최초 1회)...${NC}"
         keytool -genkey -v \
             -keystore "$KEYSTORE_FILE" \
             -storetype BKS \
             -provider org.bouncycastle.jce.provider.BouncyCastleProvider \
             -providerpath "$BC_JAR" \
-            -alias "revanced" \
+            -alias "$KEY_ALIAS" \
             -keyalg RSA \
             -keysize 2048 \
             -validity 36500 \
-            -storepass "android" \
-            -keypass "android" \
-            -dname "CN=ReVanced, OU=ReVanced, O=ReVanced, L=ReVanced, S=ReVanced, C=US" \
+            -storepass "$STORE_PASS" \
+            -keypass "$KEY_PASS" \
+            -dname "CN=KakaoTalk, OU=Patch, O=Patch, L=Seoul, S=Seoul, C=KR" \
             &>/dev/null || {
             echo -e "${RED}[ERROR] BKS 키스토어 생성 실패!${NC}"
             return 1
         }
-        echo -e "${GREEN}[OK] BKS 키스토어 생성 완료: $KEYSTORE_FILE${NC}"
-    else
-        echo -e "${GREEN}[OK] 기존 BKS 키스토어 사용: $KEYSTORE_FILE${NC}"
+        echo -e "${GREEN}[OK] BKS 키스토어 생성 완료 (영구 보존): $KEYSTORE_FILE${NC}"
+        echo -e "${GREEN}[OK] 이후 모든 업데이트는 이 동일한 키스토어로 서명됩니다.${NC}"
     fi
 
     # 작업 디렉토리 초기화
@@ -525,9 +549,9 @@ PYEOF
         --package "$PKG_NAME" \
         --include-universal \
         --keystore "$KEYSTORE_FILE" \
-        --key-alias "revanced" \
-        --keystore-password "android" \
-        --key-password "android" || {
+        --key-alias "$KEY_ALIAS" \
+        --keystore-password "$STORE_PASS" \
+        --key-password "$KEY_PASS" || {
         echo -e "${RED}[ERROR] 패치 과정 중 오류 발생${NC}"
         return 1
     }
