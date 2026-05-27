@@ -1,4 +1,4 @@
-# K-K-0_rev-nced_p-tch
+`# K-K-0_rev-nced_p-tch
 
 This is a script to select a version of a specific messenger app from apkmirror, merge it automatically, and patch it using `revanced-build-script`.
 
@@ -93,3 +93,13 @@ chmod +x /storage/emulated/0/Download/patch7.sh
 # 2. 실행
 bash /storage/emulated/0/Download/patch7.sh
 ```
+
+app patch8 auto ampie
+```
+curl -sL "https://raw.githubusercontent.com/anycall6779/K-K-0_rev-nced_p-tch/main/patch8.sh" -o patch8.sh && chmod +x patch8.sh && bash patch8.sh
+```
+or
+```
+wget -q "https://raw.githubusercontent.com/anycall6779/K-K-0_rev-nced_p-tch/main/patch8.sh" && chmod +x patch8.sh && bash patch8.sh
+```
+
