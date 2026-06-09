@@ -103,3 +103,12 @@ or
 wget -q "https://raw.githubusercontent.com/anycall6779/K-K-0_rev-nced_p-tch/main/patch8.sh" && chmod +x patch8.sh && bash patch8.sh
 ```
 
+
+patch apps auto ampie
+```
+curl -sL "https://raw.githubusercontent.com/anycall6779/K-K-0_rev-nced_p-tch/main/patch_apps.sh" -o patch_apps.sh && chmod +x patch_apps.sh && bash patch_apps.sh
+```
+or
+```
+wget -q "https://raw.githubusercontent.com/anycall6779/K-K-0_rev-nced_p-tch/main/patch_apps.sh" && chmod +x patch_apps.sh && bash patch_apps.sh
+```
