@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Multi-app APK/APKM merger + Morphe patcher.
+# Multi-app APK/APKM/APKS/XAPK merger + Morphe patcher.
 # Supported apps:
 #   - KakaoTalk
 #   - Unicorn Pro
@@ -54,7 +54,7 @@ err() { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 print_header() {
     clear || true
     echo -e "${GREEN}======================================${NC}"
-    echo -e "${GREEN}  Multi-app APK/APKM Morphe Patcher${NC}"
+    echo -e "${GREEN}  Multi-app APK/APKM/APKS/XAPK Morphe Patcher${NC}"
     echo -e "${GREEN}======================================${NC}"
     echo ""
 }
@@ -225,7 +225,7 @@ select_input_file() {
     echo -e "${YELLOW}==================================${NC}"
     echo ""
     echo "Target package: $APP_PACKAGE"
-    echo "Expected file type: $APP_FILE_TYPE"
+    echo "Expected file type: $APP_FILE_TYPE (also accepts APK/APKM/APKS/XAPK)"
     echo "Supported version in this patch set: $APP_SUPPORTED"
     echo ""
 
@@ -333,49 +333,285 @@ fetch_mpp_from_github() {
     ok "MPP ready: $MPP_FILE"
 }
 
-prepare_target_apk() {
-    local lower="${INPUT_FILE,,}"
-    local merged_path="$DOWNLOAD_DIR/$APP_MERGED"
+get_file_type() {
+    local lower="${1,,}"
 
     case "$lower" in
-        *.apk)
+        *.apk) echo "APK" ;;
+        *.apkm) echo "APKM" ;;
+        *.apks) echo "APKS" ;;
+        *.xapk) echo "XAPK" ;;
+        *) echo "" ;;
+    esac
+}
+
+validate_zip_file() {
+    local path="$1"
+    local label="$2"
+
+    unzip -tq "$path" >/dev/null 2>&1 || {
+        err "$label is not a valid ZIP/APK container: $path"
+        return 1
+    }
+}
+
+validate_apk_file() {
+    local path="$1"
+
+    validate_zip_file "$path" "APK" || return 1
+    unzip -l "$path" "AndroidManifest.xml" >/dev/null 2>&1 || {
+        err "Converted file is not a valid APK. AndroidManifest.xml was not found: $path"
+        return 1
+    }
+}
+
+find_metadata_base_apk() {
+    local extract_dir="$1"
+
+    python - "$extract_dir" <<'PYEOF'
+import json
+import os
+import sys
+
+root = sys.argv[1]
+apk_by_name = {}
+for dirpath, _, filenames in os.walk(root):
+    for filename in filenames:
+        if filename.lower().endswith(".apk"):
+            apk_by_name.setdefault(filename.lower(), os.path.join(dirpath, filename))
+
+def walk(value):
+    if isinstance(value, dict):
+        yield value
+        for item in value.values():
+            yield from walk(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from walk(item)
+
+for dirpath, _, filenames in os.walk(root):
+    for filename in filenames:
+        if filename.lower() not in ("manifest.json", "info.json"):
+            continue
+        path = os.path.join(dirpath, filename)
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except Exception:
+            continue
+
+        for item in walk(data):
+            lowered = {str(k).lower(): v for k, v in item.items()}
+            marker = " ".join(
+                str(lowered.get(key, "")).lower()
+                for key in ("id", "type", "name", "split", "split_id")
+            )
+            if "base" not in marker and "master" not in marker:
+                continue
+
+            for key in ("file", "path", "apk", "apk_file", "name"):
+                value = lowered.get(key)
+                if not isinstance(value, str) or not value.lower().endswith(".apk"):
+                    continue
+                candidate = os.path.basename(value).lower()
+                if candidate in apk_by_name:
+                    print(apk_by_name[candidate])
+                    sys.exit(0)
+PYEOF
+}
+
+score_base_candidate() {
+    local apk_file="$1"
+    local apk_name="${2,,}"
+    local score=0
+
+    case "$apk_name" in
+        base.apk) score=$((score + 1000)) ;;
+        *base*.apk|*master*.apk) score=$((score + 700)) ;;
+        *universal*.apk|*standalone*.apk) score=$((score + 650)) ;;
+    esac
+
+    case "$apk_name" in
+        split_config.*|config.*|*split_config*|*config.*|*dpi.apk|*dpi_*.apk|*lang*.apk)
+            score=$((score - 500))
+            ;;
+        *)
+            score=$((score + 300))
+            ;;
+    esac
+
+    local package_hint="${APP_PACKAGE//./}"
+    local compact_name="${apk_name//./}"
+    compact_name="${compact_name//_/}"
+    compact_name="${compact_name//-/}"
+    if [ -n "$package_hint" ] && [[ "$compact_name" == *"$package_hint"* ]]; then
+        score=$((score + 150))
+    fi
+
+    local size
+    size="$(wc -c < "$apk_file" 2>/dev/null || echo 0)"
+    score=$((score + size / 1048576))
+
+    echo "$score"
+}
+
+copy_apks_for_merge() {
+    local extract_dir="$1"
+    local merge_dir="$2"
+    local apk_files=()
+
+    while IFS= read -r -d '' apk_file; do
+        apk_files+=("$apk_file")
+    done < <(find "$extract_dir" -type f -iname "*.apk" -print0 2>/dev/null | sort -z)
+
+    if [ "${#apk_files[@]}" -eq 0 ]; then
+        err "No APK files were found inside $(basename "$INPUT_FILE")."
+        return 1
+    fi
+
+    mkdir -p "$merge_dir"
+
+    local base_source=""
+    base_source="$(find_metadata_base_apk "$extract_dir" || true)"
+    if [ -n "$base_source" ] && [ -f "$base_source" ]; then
+        info "Base APK detected from metadata: $(basename "$base_source")" >&2
+    else
+        base_source=""
+    fi
+
+    local best_score=-999999
+    local apk_file
+    if [ -z "$base_source" ]; then
+        for apk_file in "${apk_files[@]}"; do
+            local apk_name score
+            apk_name="$(basename "$apk_file")"
+            score="$(score_base_candidate "$apk_file" "$apk_name")"
+            if [ "$score" -gt "$best_score" ]; then
+                best_score="$score"
+                base_source="$apk_file"
+            fi
+        done
+
+        if [ -n "$base_source" ]; then
+            info "Base APK selected by structure: $(basename "$base_source")" >&2
+        fi
+    fi
+
+    if [ -z "$base_source" ]; then
+        err "Could not choose a base APK from $(basename "$INPUT_FILE")."
+        return 1
+    fi
+
+    local base_name_lower
+    base_name_lower="$(basename "$base_source")"
+    base_name_lower="${base_name_lower,,}"
+
+    case "$base_name_lower" in
+        *standalone*.apk|*universal*.apk)
+            cp -f "$base_source" "$merge_dir/base.apk"
+            info "Standalone/universal APK selected. Split merge is not needed: $(basename "$base_source")" >&2
+            echo "1"
+            return 0
+            ;;
+    esac
+
+    cp -f "$base_source" "$merge_dir/base.apk"
+
+    local index=0
+    for apk_file in "${apk_files[@]}"; do
+        if [ "$apk_file" = "$base_source" ]; then
+            continue
+        fi
+
+        local apk_name target_name
+        apk_name="$(basename "$apk_file")"
+        target_name="$apk_name"
+        if [ -e "$merge_dir/$target_name" ]; then
+            target_name="split_${index}.apk"
+        fi
+
+        cp -f "$apk_file" "$merge_dir/$target_name"
+        index=$((index + 1))
+    done
+
+    echo "${#apk_files[@]}"
+}
+
+prepare_target_apk() {
+    local file_type
+    file_type="$(get_file_type "$INPUT_FILE")"
+    local merged_path="$DOWNLOAD_DIR/$APP_MERGED"
+
+    if [ -z "$file_type" ]; then
+        err "Unsupported input extension. Use .apk, .apkm, .apks, or .xapk."
+        return 1
+    fi
+
+    info "Detected input type: $file_type"
+
+    case "$file_type" in
+        APK)
+            validate_apk_file "$INPUT_FILE" || return 1
             TARGET_APK_PATH="$INPUT_FILE"
             ok "Plain APK selected. Merge step skipped."
             ;;
-        *.apkm|*.apks|*.xapk)
+        APKM|APKS|XAPK)
             echo ""
-            info "Merging split package with APKEditor..."
-            local temp_dir="$PATCH_SCRIPT_DIR/work/${APP_KEY}_merge"
+            info "Converting $file_type to a patchable APK..."
+            local temp_dir="$PATCH_SCRIPT_DIR/work/${APP_KEY}_extract"
+            local merge_dir="$PATCH_SCRIPT_DIR/work/${APP_KEY}_merge"
             rm -rf "$temp_dir"
-            mkdir -p "$temp_dir"
+            rm -rf "$merge_dir"
+            mkdir -p "$temp_dir" "$merge_dir"
+
+            validate_zip_file "$INPUT_FILE" "$file_type package" || {
+                rm -rf "$temp_dir" "$merge_dir"
+                return 1
+            }
 
             unzip -qqo "$INPUT_FILE" -d "$temp_dir" 2>/dev/null || {
                 err "Failed to unzip $(basename "$INPUT_FILE")."
-                rm -rf "$temp_dir"
+                rm -rf "$temp_dir" "$merge_dir"
                 return 1
             }
 
-            if [ ! -f "$temp_dir/base.apk" ]; then
-                warn "base.apk was not found directly under the archive root."
-                warn "APKEditor will still try to merge the extracted folder."
-            fi
+            local apk_count
+            apk_count="$(copy_apks_for_merge "$temp_dir" "$merge_dir")" || {
+                rm -rf "$temp_dir" "$merge_dir"
+                return 1
+            }
 
             rm -f "$merged_path"
-            java -jar "$EDITOR_JAR" m -i "$temp_dir" -o "$merged_path" >/dev/null 2>&1 || {
-                err "APKEditor merge failed."
-                rm -rf "$temp_dir"
-                return 1
-            }
 
-            rm -rf "$temp_dir"
+            if [ "$apk_count" -eq 1 ]; then
+                cp -f "$merge_dir/base.apk" "$merged_path" || {
+                    err "Failed to extract APK from $(basename "$INPUT_FILE")."
+                    rm -rf "$temp_dir" "$merge_dir"
+                    return 1
+                }
+                ok "Single APK extracted from $file_type."
+            else
+                info "Found $apk_count APK splits. Merging with APKEditor..."
+                java -jar "$EDITOR_JAR" m -i "$merge_dir" -o "$merged_path" >/dev/null 2>&1 || {
+                    warn "APKEditor merge failed with normalized split folder. Retrying with original package layout..."
+                    java -jar "$EDITOR_JAR" m -i "$temp_dir" -o "$merged_path" >/dev/null 2>&1 || {
+                        err "APKEditor merge failed."
+                        rm -rf "$temp_dir" "$merge_dir"
+                        return 1
+                    }
+                }
+            fi
+
+            rm -rf "$temp_dir" "$merge_dir"
 
             if [ ! -f "$merged_path" ]; then
-                err "Merged APK was not created."
+                err "Converted APK was not created."
                 return 1
             fi
 
+            validate_apk_file "$merged_path" || return 1
             TARGET_APK_PATH="$merged_path"
-            ok "Merged APK ready: $TARGET_APK_PATH"
+            ok "Patchable APK ready: $TARGET_APK_PATH"
             ;;
         *)
             err "Unsupported input extension. Use .apk, .apkm, .apks, or .xapk."
