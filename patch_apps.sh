@@ -7,6 +7,7 @@
 #   - dcinside
 #   - CHZZK
 #   - Flexcil
+#   - SOOP
 #
 set -euo pipefail
 
@@ -108,6 +109,15 @@ set_app() {
             APP_SUPPORTED="1.4.3.30"
             APP_FILE_TYPE="XAPK"
             ;;
+        soop)
+            APP_KEY="soop"
+            APP_LABEL="SOOP"
+            APP_PACKAGE="kr.co.nowcom.mobile.afreeca"
+            APP_OUTPUT="sooppatch.apk"
+            APP_MERGED="SOOP_Merged.apk"
+            APP_SUPPORTED="8.25.2"
+            APP_FILE_TYPE="APK"
+            ;;
         *)
             err "Unknown app key: $key"
             return 1
@@ -138,6 +148,9 @@ normalize_app_arg() {
         5|flexcil|flex|flexcilnote|com.flexcil.flexcilnote)
             echo "flexcil"
             ;;
+        6|soop|afreeca|afreecatv|afreecatvapp|kr.co.nowcom.mobile.afreeca)
+            echo "soop"
+            ;;
         *)
             echo ""
             ;;
@@ -158,6 +171,7 @@ select_app() {
     echo -e "  ${GREEN}3.${NC} dcinside      (${BLUE}com.dcinside.app.android${NC}, XAPK, supported: 5.2.9)"
     echo -e "  ${GREEN}4.${NC} CHZZK         (${BLUE}com.navercorp.game.android.community${NC}, XAPK, supported: 3.6.0)"
     echo -e "  ${GREEN}5.${NC} Flexcil       (${BLUE}com.flexcil.flexcilnote${NC}, XAPK, supported: 1.4.3.30)"
+    echo -e "  ${GREEN}6.${NC} SOOP          (${BLUE}kr.co.nowcom.mobile.afreeca${NC}, APK, supported: 8.25.2)"
     echo ""
     read -r -p "> " selection
 
