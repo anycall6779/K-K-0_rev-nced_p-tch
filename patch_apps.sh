@@ -23,6 +23,9 @@ PATCH_SCRIPT_DIR="${PATCH_SCRIPT_DIR:-$HOME/morphe-build-script}"
 DOWNLOAD_DIR="${DOWNLOAD_DIR:-$HOME/Downloads}"
 EDITOR_JAR="${EDITOR_JAR:-$BASE_DIR/APKEditor-1.4.5.jar}"
 MORPHE_CLI_JAR="${MORPHE_CLI_JAR:-$PATCH_SCRIPT_DIR/morphe-cli.jar}"
+MORPHE_CLI_URL_FILE="${MORPHE_CLI_URL_FILE:-$MORPHE_CLI_JAR.url}"
+MORPHE_CLI_FALLBACK_VERSION="1.10.0-dev.3"
+MORPHE_CLI_FALLBACK_URL="https://github.com/MorpheApp/morphe-cli/releases/download/v${MORPHE_CLI_FALLBACK_VERSION}/morphe-cli-${MORPHE_CLI_FALLBACK_VERSION}-all.jar"
 MPP_FILE="${MPP_FILE:-$PATCH_SCRIPT_DIR/patches-current.mpp}"
 
 GITHUB_REPO="${GITHUB_REPO:-AmpleReVanced/revanced-patches}"
@@ -52,6 +55,44 @@ ok() { echo -e "${GREEN}[OK]${NC} $*"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
 err() { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 
+latest_morphe_cli_asset() {
+    local info
+    info="$(curl -fsSL "https://api.github.com/repos/MorpheApp/morphe-cli/releases?per_page=10" \
+        | jq -r '[.[] | .assets[] | select(.name | endswith("all.jar"))][0]
+            | "\(.browser_download_url)\t\(.name)"' 2>/dev/null || true)"
+    if [ -z "$info" ] || [ "$info" = "null" ]; then
+        info="${MORPHE_CLI_FALLBACK_URL}"$'\t'"morphe-cli-${MORPHE_CLI_FALLBACK_VERSION}-all.jar"
+    fi
+    printf '%s\n' "$info"
+}
+
+ensure_morphe_cli() {
+    info "Checking latest morphe-cli..."
+    local cli_info cli_url cli_name recorded_url tmp_file
+    cli_info="$(latest_morphe_cli_asset)"
+    cli_url="${cli_info%%$'\t'*}"
+    cli_name="${cli_info#*$'\t'}"
+    recorded_url=""
+    tmp_file="$MORPHE_CLI_JAR.tmp"
+
+    [ -f "$MORPHE_CLI_URL_FILE" ] && recorded_url="$(cat "$MORPHE_CLI_URL_FILE" 2>/dev/null || true)"
+    if [ -f "$MORPHE_CLI_JAR" ] && [ "$recorded_url" = "$cli_url" ]; then
+        ok "morphe-cli is current: $cli_name"
+        return 0
+    fi
+
+    info "Downloading morphe-cli: $cli_name"
+    rm -f "$tmp_file"
+    curl -L --fail --progress-bar -o "$tmp_file" "$cli_url" || {
+        rm -f "$tmp_file"
+        err "Failed to download morphe-cli."
+        return 1
+    }
+    mv -f "$tmp_file" "$MORPHE_CLI_JAR"
+    printf '%s\n' "$cli_url" > "$MORPHE_CLI_URL_FILE"
+    ok "morphe-cli ready: $cli_name"
+}
+
 print_header() {
     clear || true
     echo -e "${GREEN}======================================${NC}"
@@ -70,7 +111,7 @@ set_app() {
             APP_PACKAGE="com.kakao.talk"
             APP_OUTPUT="kakaotalkpatch.apk"
             APP_MERGED="KakaoTalk_Merged.apk"
-            APP_SUPPORTED="26.4.2"
+            APP_SUPPORTED="26.5.2"
             APP_FILE_TYPE="APKM"
             ;;
         unicorn)
@@ -79,7 +120,7 @@ set_app() {
             APP_PACKAGE="com.unicornsoft.android.unicornpro"
             APP_OUTPUT="unicornpatch.apk"
             APP_MERGED="UnicornPro_Merged.apk"
-            APP_SUPPORTED="1.30.467"
+            APP_SUPPORTED="1.30.471"
             APP_FILE_TYPE="APK"
             ;;
         dcinside)
@@ -88,7 +129,7 @@ set_app() {
             APP_PACKAGE="com.dcinside.app.android"
             APP_OUTPUT="dcinsidepatch.apk"
             APP_MERGED="dcinside_Merged.apk"
-            APP_SUPPORTED="5.2.9"
+            APP_SUPPORTED="5.2.15"
             APP_FILE_TYPE="XAPK"
             ;;
         chzzk)
@@ -97,7 +138,7 @@ set_app() {
             APP_PACKAGE="com.navercorp.game.android.community"
             APP_OUTPUT="chzzkpatch.apk"
             APP_MERGED="CHZZK_Merged.apk"
-            APP_SUPPORTED="3.6.0"
+            APP_SUPPORTED="3.6.2"
             APP_FILE_TYPE="XAPK"
             ;;
         flexcil)
@@ -166,10 +207,10 @@ select_app() {
     fi
 
     echo -e "${YELLOW}Select target app:${NC}"
-    echo -e "  ${GREEN}1.${NC} KakaoTalk     (${BLUE}com.kakao.talk${NC}, APKM, supported: 26.4.2)"
-    echo -e "  ${GREEN}2.${NC} Unicorn Pro   (${BLUE}com.unicornsoft.android.unicornpro${NC}, APK, supported: 1.30.467)"
-    echo -e "  ${GREEN}3.${NC} dcinside      (${BLUE}com.dcinside.app.android${NC}, XAPK, supported: 5.2.9)"
-    echo -e "  ${GREEN}4.${NC} CHZZK         (${BLUE}com.navercorp.game.android.community${NC}, XAPK, supported: 3.6.0)"
+    echo -e "  ${GREEN}1.${NC} KakaoTalk     (${BLUE}com.kakao.talk${NC}, APKM, supported: 26.5.2)"
+    echo -e "  ${GREEN}2.${NC} Unicorn Pro   (${BLUE}com.unicornsoft.android.unicornpro${NC}, APK, supported: 1.30.471)"
+    echo -e "  ${GREEN}3.${NC} dcinside      (${BLUE}com.dcinside.app.android${NC}, XAPK, supported: 5.2.15)"
+    echo -e "  ${GREEN}4.${NC} CHZZK         (${BLUE}com.navercorp.game.android.community${NC}, XAPK, supported: 3.6.2)"
     echo -e "  ${GREEN}5.${NC} Flexcil       (${BLUE}com.flexcil.flexcilnote${NC}, XAPK, supported: 1.4.3.30)"
     echo -e "  ${GREEN}6.${NC} SOOP          (${BLUE}kr.co.nowcom.mobile.afreeca${NC}, APK, supported: 8.25.2)"
     echo ""
@@ -207,23 +248,7 @@ check_dependencies() {
         }
     fi
 
-    if [ ! -f "$MORPHE_CLI_JAR" ]; then
-        info "Finding latest morphe-cli release..."
-        local cli_url
-        cli_url="$(curl -fsSL "https://api.github.com/repos/MorpheApp/morphe-cli/releases?per_page=10" \
-            | jq -r '[.[] | .assets[] | select(.name | endswith("all.jar"))][0].browser_download_url // empty')"
-
-        if [ -z "$cli_url" ]; then
-            warn "Could not find latest morphe-cli release. Falling back to v1.5.0-dev.7."
-            cli_url="https://github.com/MorpheApp/morphe-cli/releases/download/v1.5.0-dev.7/morphe-cli-1.5.0-dev.7-all.jar"
-        fi
-
-        info "Downloading morphe-cli..."
-        curl -L --fail --progress-bar -o "$MORPHE_CLI_JAR" "$cli_url" || {
-            err "Failed to download morphe-cli."
-            missing=1
-        }
-    fi
+    ensure_morphe_cli || missing=1
 
     if [ "$missing" -eq 1 ]; then
         exit 1

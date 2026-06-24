@@ -34,7 +34,62 @@ KEY_PASS=""             # 빈 문자열
 STORE_PASS=""           # 빈 문자열
 
 MORPHE_CLI_JAR="$PATCH_SCRIPT_DIR/morphe-cli.jar"
+MORPHE_CLI_URL_FILE="$MORPHE_CLI_JAR.url"
+MORPHE_CLI_FALLBACK_VERSION="1.10.0-dev.3"
+MORPHE_CLI_FALLBACK_URL="https://github.com/MorpheApp/morphe-cli/releases/download/v${MORPHE_CLI_FALLBACK_VERSION}/morphe-cli-${MORPHE_CLI_FALLBACK_VERSION}-all.jar"
 MPP_FILE="$BASE_DIR/patches-fixed.mpp"
+
+# --- Morphe CLI Update ---
+get_latest_morphe_cli_asset() {
+    local CLI_INFO=""
+
+    if command -v jq &> /dev/null; then
+        CLI_INFO=$(curl -fsSL "https://api.github.com/repos/MorpheApp/morphe-cli/releases?per_page=10" 2>/dev/null \
+            | jq -r '[.[] | .assets[] | select(.name | endswith("all.jar"))][0]
+                | select(.browser_download_url != null)
+                | "\(.browser_download_url)\t\(.name)"' 2>/dev/null || true)
+    fi
+
+    if [ -z "$CLI_INFO" ] || [ "$CLI_INFO" = "null" ]; then
+        CLI_INFO="${MORPHE_CLI_FALLBACK_URL}\tmorphe-cli-${MORPHE_CLI_FALLBACK_VERSION}-all.jar"
+    fi
+
+    printf '%b\n' "$CLI_INFO"
+}
+
+ensure_morphe_cli() {
+    echo -e "${YELLOW}[INFO] morphe-cli 최신 버전 확인 중...${NC}"
+
+    local CLI_INFO CLI_URL CLI_NAME RECORDED_URL TMP_FILE
+    CLI_INFO="$(get_latest_morphe_cli_asset)"
+    CLI_URL="${CLI_INFO%%$'\t'*}"
+    CLI_NAME="${CLI_INFO#*$'\t'}"
+    TMP_FILE="$MORPHE_CLI_JAR.tmp"
+    RECORDED_URL=""
+
+    [ -f "$MORPHE_CLI_URL_FILE" ] && RECORDED_URL="$(cat "$MORPHE_CLI_URL_FILE" 2>/dev/null || true)"
+
+    if [ -f "$MORPHE_CLI_JAR" ] && [ "$RECORDED_URL" = "$CLI_URL" ]; then
+        echo -e "${GREEN}[OK] morphe-cli 최신 버전 사용 중: ${CLI_NAME}${NC}"
+        return 0
+    fi
+
+    if [ -f "$MORPHE_CLI_JAR" ]; then
+        echo -e "${YELLOW}[INFO] 기존 morphe-cli가 오래되었거나 버전 기록이 없습니다. 새로 받습니다: ${CLI_NAME}${NC}"
+    else
+        echo -e "${YELLOW}[INFO] morphe-cli 다운로드 중: ${CLI_NAME}${NC}"
+    fi
+
+    rm -f "$TMP_FILE"
+    curl -L --fail --progress-bar -o "$TMP_FILE" "$CLI_URL" || {
+        rm -f "$TMP_FILE"
+        echo -e "${RED}[ERROR] morphe-cli 다운로드 실패${NC}"
+        return 1
+    }
+    mv -f "$TMP_FILE" "$MORPHE_CLI_JAR"
+    printf '%s\n' "$CLI_URL" > "$MORPHE_CLI_URL_FILE"
+    echo -e "${GREEN}[OK] morphe-cli 준비 완료: ${CLI_NAME}${NC}"
+}
 
 # --- Dependency Check ---
 check_dependencies() {
@@ -60,19 +115,7 @@ check_dependencies() {
         }
     fi
 
-    if [ ! -f "$MORPHE_CLI_JAR" ]; then
-        echo -e "${YELLOW}[INFO] morphe-cli 최신 버전 확인 중...${NC}"
-        local CLI_URL=$(curl -s "https://api.github.com/repos/MorpheApp/morphe-cli/releases" | jq -r '.[0].assets[] | select(.name | endswith("all.jar")) | .browser_download_url' | head -n 1)
-        if [ -z "$CLI_URL" ] || [ "$CLI_URL" = "null" ]; then
-            echo -e "${RED}[ERROR] morphe-cli URL을 가져오지 못했습니다. (dev 릴리스 fallback 사용)${NC}"
-            CLI_URL="https://github.com/MorpheApp/morphe-cli/releases/download/v1.5.0-dev.7/morphe-cli-1.5.0-dev.7-all.jar"
-        fi
-        echo -e "${YELLOW}[INFO] morphe-cli 다운로드 중...${NC}"
-        wget --quiet --show-progress -O "$MORPHE_CLI_JAR" "$CLI_URL" || {
-            echo -e "${RED}[ERROR] morphe-cli 다운로드 실패${NC}"
-            MISSING=1
-        }
-    fi
+    ensure_morphe_cli || MISSING=1
     
     [ $MISSING -eq 1 ] && exit 1
     echo -e "${GREEN}[OK] 모든 준비 완료${NC}"
