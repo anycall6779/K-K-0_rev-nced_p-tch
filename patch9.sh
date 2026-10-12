@@ -313,7 +313,7 @@ list_input_candidates() {
 import os
 import sys
 
-extensions = {".apk", ".apkm", ".apks", ".xapk"}
+extensions = {".apkm"}
 seen_roots, seen_files = set(), set()
 files = []
 for index, root in enumerate(sys.argv[1:]):
@@ -358,7 +358,7 @@ select_input_file() {
     echo -e "${YELLOW}==================================${NC}"
     echo ""
     echo "Target package: $APP_PACKAGE"
-    echo "Expected file type: $APP_FILE_TYPE (also accepts APK/APKM/APKS/XAPK)"
+    echo "File selection list: APKM only (.apkm/.APKM)"
     echo "Supported version in this patch set: $APP_SUPPORTED"
     echo ""
 
@@ -385,7 +385,7 @@ select_input_file() {
             INPUT_FILE="$selection"
         fi
     else
-        echo -e "${BLUE}Enter the full path to an .apk/.apkm/.apks/.xapk file:${NC}"
+        echo -e "${BLUE}Enter the full path to an .apkm file:${NC}"
         read -r -p "> " INPUT_FILE
     fi
 
