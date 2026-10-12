@@ -105,7 +105,7 @@ wget -q "https://raw.githubusercontent.com/anycall6779/K-K-0_rev-nced_p-tch/main
 
 app patch9 auto ampie
 ```
-curl -sL "https://raw.githubusercontent.com/anycall6779/K-K-0_rev-nced_p-tch/main/patch9.sh" -o patch9.sh && chmod +x patch9.sh && bash patch8.sh
+curl -sL "https://raw.githubusercontent.com/anycall6779/K-K-0_rev-nced_p-tch/main/patch9.sh" -o patch9.sh && chmod +x patch9.sh && bash patch9.sh
 ```
 or
 ```

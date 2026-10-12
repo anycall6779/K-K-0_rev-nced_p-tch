@@ -992,6 +992,7 @@ def main():
     parser.add_argument("--app-label", required=True)
     parser.add_argument("--include-universal", action="store_true")
     parser.add_argument("--list-only", action="store_true")
+    parser.add_argument("--resource-guard", default="")
     parser.add_argument("--keystore", default="")
     parser.add_argument("--keystore-password", default=None)
     parser.add_argument("--key-alias", default="")
@@ -1049,6 +1050,21 @@ def main():
                 log.flush()
             returncode = process.wait()
     if returncode == 0 and os.path.isfile(args.output):
+        if not args.resource_guard:
+            raise RuntimeError("Resource guard is required; run patch9.sh or patch_apps.sh")
+        keystore, alias = args.keystore, args.key_alias
+        store_password, key_password = args.keystore_password or "", args.key_password or ""
+        if not keystore:
+            data_root = os.environ.get("MORPHE_DATA_DIR") or os.path.join(
+                os.path.dirname(os.path.abspath(args.cli)), "morphe-data")
+            keystore = os.path.join(data_root, "morphe.keystore")
+            alias, key_password = "Morphe", "Morphe"
+        env = os.environ.copy()
+        env["RESOURCE_STORE_PASS"] = store_password
+        env["RESOURCE_KEY_PASS"] = key_password
+        guard_command = [sys.executable, args.resource_guard, "--apk", args.output,
+                         "--cli", args.cli, "--keystore", keystore, "--alias", alias]
+        subprocess.run(guard_command, check=True, env=env)
         print(f"[DONE] Patched APK: {args.output}")
     else:
         print(f"[ERR] Patch failed (exit={returncode}); see {log_path}")
@@ -1058,7 +1074,7 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
         print(f"[ERR] {exc}", file=sys.stderr)
         sys.exit(1)
     except KeyboardInterrupt:
@@ -1066,6 +1082,143 @@ if __name__ == "__main__":
 PYEOF
 
     echo "$selector"
+}
+
+write_resource_guard() {
+    local guard="$PATCH_SCRIPT_DIR/morphe_resource_guard.py"
+    cat > "$guard" <<'RESOURCE_PYEOF'
+import argparse
+import copy
+import os
+import shutil
+import struct
+import subprocess
+import tempfile
+import zipfile
+from pathlib import Path
+
+SIGNER_SOURCE = 'import java.io.*;\nimport java.security.*;\nimport java.security.cert.X509Certificate;\nimport java.util.*;\nimport com.android.apksig.ApkSigner;\nimport com.android.apksig.ApkVerifier;\nimport org.bouncycastle.jce.provider.BouncyCastleProvider;\nclass RepairSigner {\n public static void main(String[] args) throws Exception {\n  Security.addProvider(new BouncyCastleProvider());\n  byte[] header;\n  try (var input=new FileInputStream(args[3])) { header=input.readNBytes(4); }\n  String format=Arrays.equals(header,new byte[]{0,0,0,2})||Arrays.equals(header,new byte[]{0,0,0,1})?"BKS":\n    Arrays.equals(header,new byte[]{(byte)0xfe,(byte)0xed,(byte)0xfe,(byte)0xed})?"JKS":"PKCS12";\n  KeyStore ks=KeyStore.getInstance(format);\n  try (var in=new FileInputStream(args[3])) { ks.load(in,System.getenv().getOrDefault("RESOURCE_STORE_PASS", "").toCharArray()); }\n  String alias=args[4];\n  var cert=(X509Certificate)ks.getCertificate(alias);\n  var old=new ApkVerifier.Builder(new File(args[0])).build().verify();\n  if(!old.isVerified())throw new Exception("Original signature did not verify: "+old.getErrors());\n  if(cert==null || old.getSignerCertificates().size()!=1 || !Arrays.equals(cert.getEncoded(),old.getSignerCertificates().get(0).getEncoded()))\n   throw new Exception("Signing certificate mismatch: refusing to change installed identity");\n  PrivateKey key=(PrivateKey)ks.getKey(alias,System.getenv().getOrDefault("RESOURCE_KEY_PASS", "").toCharArray());\n  var config=new ApkSigner.SignerConfig.Builder("ReVanced",new com.android.apksig.KeyConfig.Jca(key),List.of(cert)).build();\n  new ApkSigner.Builder(List.of(config)).setInputApk(new File(args[1])).setOutputApk(new File(args[2]))\n   .setV1SigningEnabled(true).setV2SigningEnabled(true).setV3SigningEnabled(true)\n   .setAlignmentPreserved(false).setLibraryPageAlignmentBytes(16384).build().sign();\n  var result=new ApkVerifier.Builder(new File(args[2])).build().verify();\n  if(!result.isVerified())throw new Exception("Signature verification failed: "+result.getErrors());\n  System.out.println("Verified signed APK; same certificate SHA256="+HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(cert.getEncoded())));\n }\n}\n'
+
+
+def chunks(data, start, end):
+    while start < end:
+        if start + 8 > end:
+            raise ValueError("Truncated ARSC chunk")
+        kind, header, size = struct.unpack_from("<HHI", data, start)
+        if header < 8 or size < header or start + size > end:
+            raise ValueError("Invalid ARSC chunk size")
+        yield start, kind, header, size
+        start += size
+    if start != end:
+        raise ValueError("ARSC size mismatch")
+
+
+def fix_sparse_order(data):
+    if len(data) < 12:
+        raise ValueError("Truncated resource table")
+    kind, header, size = struct.unpack_from("<HHI", data)
+    if kind != 2 or size != len(data):
+        raise ValueError("Invalid resource table")
+    output = bytearray(data)
+    changed = 0
+    for pos, kind, package_header, package_size in chunks(data, header, size):
+        if kind != 0x200:
+            continue
+        for position, kind, type_header, type_size in chunks(
+                data, pos + package_header, pos + package_size):
+            if kind != 0x201:
+                continue
+            if type_header < 20:
+                raise ValueError("Truncated resource type header")
+            if not data[position + 9] & 1:
+                continue
+            count, entries_start = struct.unpack_from("<II", data, position + 12)
+            if type_header + count * 4 > entries_start or entries_start > type_size:
+                raise ValueError("Invalid sparse index boundaries")
+            pairs = [struct.unpack_from("<HH", data, position + type_header + i * 4)
+                     for i in range(count)]
+            if len({entry_id for entry_id, _ in pairs}) != count:
+                raise ValueError("Duplicate sparse resource IDs")
+            if any(entries_start + offset * 4 >= type_size for _, offset in pairs):
+                raise ValueError("Invalid sparse entry offset")
+            ordered = sorted(pairs, key=lambda pair: pair[0])
+            if ordered != pairs:
+                for i, pair in enumerate(ordered):
+                    struct.pack_into("<HH", output, position + type_header + i * 4, *pair)
+                changed += 1
+    return bytes(output), changed
+
+
+def rewrite_apk(source, destination, resource_table):
+    with zipfile.ZipFile(source) as original, zipfile.ZipFile(destination, "w") as output:
+        for entry in original.infolist():
+            upper = entry.filename.upper()
+            if upper.startswith("META-INF/") and upper.endswith((".SF", ".RSA", ".DSA", ".EC")):
+                continue
+            info = copy.copy(entry)
+            data = resource_table if entry.filename == "resources.arsc" else original.read(entry)
+            if entry.filename == "resources.arsc":
+                info.compress_type = zipfile.ZIP_STORED
+            if info.compress_type == zipfile.ZIP_STORED:
+                filename = info.filename.encode("utf-8" if any(ord(c) > 127 for c in info.filename) else "ascii")
+                offset = output.fp.tell() + 30 + len(filename) + len(info.extra)
+                padding = (-offset) % 4
+                if padding:
+                    info.extra += struct.pack("<HH", 0xd935, padding) + bytes(padding)
+            output.writestr(info, data)
+
+
+def repair(args):
+    apk = Path(args.apk).resolve()
+    with zipfile.ZipFile(apk) as source:
+        fixed, changed = fix_sparse_order(source.read("resources.arsc"))
+    print(f"[RESOURCE] Unsorted sparse type chunks: {changed}")
+    if args.check:
+        return 2 if changed else 0
+    if not changed:
+        return 0
+    if not args.keystore or not Path(args.keystore).is_file():
+        raise RuntimeError("Resource repair requires the same signing keystore used for this APK.")
+    # Do not replace the signed APK unless repaired output verifies with exactly
+    # the same certificate. Never uninstall the app or clear app data.
+    with tempfile.TemporaryDirectory(prefix="resource-repair-", dir=apk.parent) as work:
+        work = Path(work)
+        unsigned, signed = work / "unsigned.apk", work / "signed.apk"
+        rewrite_apk(apk, unsigned, fixed)
+        signer = work / "RepairSigner.java"
+        signer.write_text(SIGNER_SOURCE, encoding="utf-8")
+        command = ["java", "--class-path", args.cli, str(signer), str(apk),
+                   str(unsigned), str(signed), args.keystore, args.alias]
+        subprocess.run(command, check=True, timeout=300)
+        with zipfile.ZipFile(signed) as source:
+            _, remaining = fix_sparse_order(source.read("resources.arsc"))
+        if remaining:
+            raise RuntimeError("Sparse resource order is still invalid after signing")
+        os.replace(signed, apk)
+    print("[RESOURCE] Corrected indices and verified same-certificate signing")
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--apk", required=True)
+    parser.add_argument("--cli", default="")
+    parser.add_argument("--keystore", default="")
+    parser.add_argument("--alias", default="ReVanced Key")
+    parser.add_argument("--check", action="store_true")
+    args = parser.parse_args()
+    try:
+        return repair(args)
+    except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError,
+            zipfile.BadZipFile) as exc:
+        print(f"[RESOURCE ERROR] {exc}")
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+RESOURCE_PYEOF
+    echo "$guard"
 }
 
 run_patch() {
@@ -1078,6 +1231,8 @@ run_patch() {
     ensure_questionary || return 1
     local selector
     selector="$(write_patch_selector)" || return 1
+    local resource_guard
+    resource_guard="$(write_resource_guard)" || return 1
 
     local work_dir="$PATCH_SCRIPT_DIR/work/$APP_KEY"
     local output_tmp="$work_dir/patched.apk"
@@ -1092,6 +1247,7 @@ run_patch() {
         --output "$output_tmp"
         --package "$APP_PACKAGE"
         --app-label "$APP_LABEL"
+        --resource-guard "$resource_guard"
         --include-universal
     )
 
@@ -1128,7 +1284,29 @@ run_patch() {
     ok "Saved: $final_path"
 }
 
+repair_existing_apk() {
+    local input="${1:-}" guard work="$PATCH_SCRIPT_DIR/work/repair" output="$BASE_DIR/kakaotalkpatch_repaired.apk"
+    [ -f "$input" ] || { err "Usage: bash patch9.sh --repair /path/to/patched.apk"; return 1; }
+    check_dependencies || return 1
+    prepare_keystore || return 1
+    [ -n "$KEYSTORE_FILE" ] || { err "Repair mode requires SIGNING_KEYSTORE or the existing repository key."; return 1; }
+    guard="$(write_resource_guard)" || return 1
+    mkdir -p "$work"
+    validate_apk_file "$input" || return 1
+    cp -f "$input" "$work/repaired.apk" || return 1
+    RESOURCE_STORE_PASS="$STORE_PASS" RESOURCE_KEY_PASS="$KEY_PASS" \
+        python "$guard" --apk "$work/repaired.apk" --cli "$MORPHE_CLI_JAR" \
+            --keystore "$KEYSTORE_FILE" --alias "$KEY_ALIAS" || return 1
+    [ ! -e "$output" ] || cp -p "$output" "$output.previous"
+    mv -f "$work/repaired.apk" "$output"
+    ok "Repaired APK: $output (original preserved: $input)"
+}
+
 main() {
+    if [ "${1:-}" = "--repair" ]; then
+        repair_existing_apk "${2:-}"
+        return $?
+    fi
     print_header
     select_app "${1:-}" || exit 1
     echo -e "${GREEN}Selected app:${NC} $APP_LABEL"
