@@ -291,6 +291,66 @@ ensure_apkeditor() {
     mv -f "$EDITOR_JAR.tmp" "$EDITOR_JAR"
 }
 
+normalize_input_path() {
+    local path="$1"
+    # Accept paths pasted with outer quotes and common Termux storage aliases.
+    if [[ "$path" == \"*\" ]] || [[ "$path" == \'*\' ]]; then
+        path="${path:1:${#path}-2}"
+    fi
+    case "$path" in
+        '~/'*) path="$HOME/${path:2}" ;;
+    esac
+    if [ ! -f "$path" ] && [ -f "$BASE_DIR/$path" ]; then
+        path="$BASE_DIR/$path"
+    fi
+    printf '%s\n' "$path"
+}
+
+list_input_candidates() {
+    # os.scandir follows a root directory symlink (find without -H does not).
+    # Limit recursion to download folders, not all of shared storage.
+    python - "$BASE_DIR" "$HOME/storage/downloads" "$HOME/Downloads" "$SCRIPT_DIR" "$PWD" <<'INPUT_PYEOF'
+import os
+import sys
+
+extensions = {".apk", ".apkm", ".apks", ".xapk"}
+seen_roots, seen_files = set(), set()
+files = []
+for index, root in enumerate(sys.argv[1:]):
+    real_root = os.path.realpath(root)
+    if real_root in seen_roots:
+        continue
+    seen_roots.add(real_root)
+    if not os.path.isdir(root):
+        if index == 0:
+            print(f"[WARN] Input folder does not exist or is inaccessible: {root}", file=sys.stderr)
+        continue
+    pending = [(root, 0)]
+    while pending:
+        folder, depth = pending.pop()
+        try:
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_file() and os.path.splitext(entry.name)[1].lower() in extensions:
+                            real_file = os.path.realpath(entry.path)
+                            if real_file not in seen_files:
+                                seen_files.add(real_file)
+                                files.append(os.path.abspath(entry.path))
+                        elif index < 3 and depth < 2 and entry.is_dir(follow_symlinks=False):
+                            pending.append((entry.path, depth + 1))
+                    except OSError as exc:
+                        print(f"[WARN] Cannot inspect input file: {entry.path}: {exc}", file=sys.stderr)
+        except OSError as exc:
+            print(f"[WARN] Cannot read input folder: {folder}: {exc}", file=sys.stderr)
+            print("[WARN] Termux shared storage: run termux-setup-storage and grant storage access.", file=sys.stderr)
+# Original APKM/bundles first; patched APKs remain available for explicit choice.
+files.sort(key=lambda path: (os.path.splitext(path)[1].lower() == ".apk", path.casefold()))
+for path in files:
+    sys.stdout.buffer.write(os.fsencode(path) + b"\0")
+INPUT_PYEOF
+}
+
 select_input_file() {
     echo ""
     echo -e "${YELLOW}==================================${NC}"
@@ -305,15 +365,13 @@ select_input_file() {
     local files=()
     while IFS= read -r -d '' file; do
         files+=("$file")
-    done < <(find "$BASE_DIR" -maxdepth 1 -type f \( \
-        -iname "*.apk" -o -iname "*.apkm" -o -iname "*.apks" -o -iname "*.xapk" \
-    \) -print0 2>/dev/null | sort -z)
+    done < <(list_input_candidates)
 
     if [ "${#files[@]}" -gt 0 ]; then
-        echo -e "${BLUE}Files found in $BASE_DIR:${NC}"
+        echo -e "${BLUE}Files found in download folders and script folder:${NC}"
         local i
         for i in "${!files[@]}"; do
-            echo -e "  ${GREEN}$((i + 1)).${NC} $(basename "${files[$i]}")"
+            echo -e "  ${GREEN}$((i + 1)).${NC} ${files[$i]}"
         done
         echo ""
         echo -e "${YELLOW}Enter a number, or paste a full file path:${NC}"
@@ -322,7 +380,7 @@ select_input_file() {
         if [[ "$selection" =~ ^[0-9]+$ ]] \
             && [ "$selection" -ge 1 ] \
             && [ "$selection" -le "${#files[@]}" ]; then
-            INPUT_FILE="${files[$((selection - 1))]}"
+            INPUT_FILE="${files[$((10#$selection - 1))]}"
         else
             INPUT_FILE="$selection"
         fi
@@ -331,8 +389,10 @@ select_input_file() {
         read -r -p "> " INPUT_FILE
     fi
 
+    INPUT_FILE="$(normalize_input_path "$INPUT_FILE")"
     if [ -z "$INPUT_FILE" ] || [ ! -f "$INPUT_FILE" ]; then
-        err "Invalid file path: ${INPUT_FILE:-empty}"
+        err "Invalid or inaccessible file path: ${INPUT_FILE:-empty}"
+        warn "Run termux-setup-storage, grant storage access, and paste the full APKM path."
         return 1
     fi
 
@@ -1315,7 +1375,7 @@ main() {
 
     check_dependencies || exit 1
     if [ -n "${2:-}" ]; then
-        INPUT_FILE="$2"
+        INPUT_FILE="$(normalize_input_path "$2")"
         [ -f "$INPUT_FILE" ] || { err "Input file not found: $INPUT_FILE"; exit 1; }
     else
         select_input_file || exit 1
