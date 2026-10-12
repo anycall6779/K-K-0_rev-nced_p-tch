@@ -21,11 +21,11 @@ BASE_DIR="${BASE_DIR:-/storage/emulated/0/Download}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)"
 PATCH_SCRIPT_DIR="${PATCH_SCRIPT_DIR:-$HOME/morphe-build-script}"
 DOWNLOAD_DIR="${DOWNLOAD_DIR:-$HOME/Downloads}"
-EDITOR_JAR="${EDITOR_JAR:-$BASE_DIR/APKEditor-1.4.5.jar}"
+EDITOR_JAR="${EDITOR_JAR:-$BASE_DIR/APKEditor-1.4.9.jar}"
 MORPHE_CLI_JAR="${MORPHE_CLI_JAR:-$PATCH_SCRIPT_DIR/morphe-cli.jar}"
 MORPHE_CLI_URL_FILE="${MORPHE_CLI_URL_FILE:-$MORPHE_CLI_JAR.url}"
-MORPHE_CLI_FALLBACK_VERSION="1.10.0-dev.3"
-MORPHE_CLI_FALLBACK_URL="https://github.com/MorpheApp/morphe-cli/releases/download/v${MORPHE_CLI_FALLBACK_VERSION}/morphe-cli-${MORPHE_CLI_FALLBACK_VERSION}-all.jar"
+MORPHE_CLI_FALLBACK_VERSION="1.18.2-dev.4"
+MORPHE_CLI_FALLBACK_URL="https://github.com/MorpheApp/morphe-desktop/releases/download/v${MORPHE_CLI_FALLBACK_VERSION}/morphe-desktop-${MORPHE_CLI_FALLBACK_VERSION}-all.jar"
 MPP_FILE="${MPP_FILE:-$PATCH_SCRIPT_DIR/patches-current.mpp}"
 
 GITHUB_REPO="${GITHUB_REPO:-AmpleReVanced/revanced-patches}"
@@ -55,15 +55,29 @@ ok() { echo -e "${GREEN}[OK]${NC} $*"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
 err() { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 
-latest_morphe_cli_asset() {
-    local info
-    info="$(curl -fsSL "https://api.github.com/repos/MorpheApp/morphe-cli/releases?per_page=10" \
-        | jq -r '[.[] | .assets[] | select(.name | endswith("all.jar"))][0]
-            | "\(.browser_download_url)\t\(.name)"' 2>/dev/null || true)"
-    if [ -z "$info" ] || [ "$info" = "null" ]; then
-        info="${MORPHE_CLI_FALLBACK_URL}"$'\t'"morphe-cli-${MORPHE_CLI_FALLBACK_VERSION}-all.jar"
+# Do not use /releases/latest: GitHub excludes pre-releases there.
+# GITHUB_TOKEN is optional and is never printed.
+github_api() {
+    local args=(-fsSL --retry 3 --connect-timeout 20 --max-time 120
+        -H "Accept: application/vnd.github+json")
+    if [ -n "${GITHUB_TOKEN:-}" ]; then
+        args+=(-H "Authorization: Bearer $GITHUB_TOKEN")
     fi
-    printf '%s\n' "$info"
+    curl "${args[@]}" "$1"
+}
+
+latest_morphe_cli_asset() {
+    local asset_info
+    asset_info="$(github_api "https://api.github.com/repos/MorpheApp/morphe-desktop/releases?per_page=30" \
+        | jq -er '[.[] | select(.draft == false)] | sort_by(.published_at) | reverse
+            | [.[] | .assets[] | select(.name | test("^morphe-desktop-.*-all\\.jar$"))][0]
+            | select(.browser_download_url != null)
+            | "\(.browser_download_url)\t\(.name)"' || true)"
+    if [ -z "$asset_info" ]; then
+        warn "GitHub API unavailable; using pinned Desktop $MORPHE_CLI_FALLBACK_VERSION." >&2
+        asset_info="${MORPHE_CLI_FALLBACK_URL}"$'\t'"morphe-desktop-${MORPHE_CLI_FALLBACK_VERSION}-all.jar"
+    fi
+    printf '%s\n' "$asset_info"
 }
 
 ensure_morphe_cli() {
@@ -74,10 +88,11 @@ ensure_morphe_cli() {
     cli_name="${cli_info#*$'\t'}"
     recorded_url=""
     tmp_file="$MORPHE_CLI_JAR.tmp"
+    mkdir -p "$(dirname "$MORPHE_CLI_JAR")" "$(dirname "$MORPHE_CLI_URL_FILE")"
 
     [ -f "$MORPHE_CLI_URL_FILE" ] && recorded_url="$(cat "$MORPHE_CLI_URL_FILE" 2>/dev/null || true)"
     if [ -f "$MORPHE_CLI_JAR" ] && [ "$recorded_url" = "$cli_url" ]; then
-        ok "morphe-cli is current: $cli_name"
+        ok "Morphe Desktop CLI is current: $cli_name"
         return 0
     fi
 
@@ -88,6 +103,7 @@ ensure_morphe_cli() {
         err "Failed to download morphe-cli."
         return 1
     }
+    validate_zip_file "$tmp_file" "Desktop JAR" || return 1
     mv -f "$tmp_file" "$MORPHE_CLI_JAR"
     printf '%s\n' "$cli_url" > "$MORPHE_CLI_URL_FILE"
     ok "morphe-cli ready: $cli_name"
@@ -111,7 +127,7 @@ set_app() {
             APP_PACKAGE="com.kakao.talk"
             APP_OUTPUT="kakaotalkpatch.apk"
             APP_MERGED="KakaoTalk_Merged.apk"
-            APP_SUPPORTED="26.5.2"
+            APP_SUPPORTED="read from selected MPP (not hard-coded)"
             APP_FILE_TYPE="APKM"
             ;;
         unicorn)
@@ -120,7 +136,7 @@ set_app() {
             APP_PACKAGE="com.unicornsoft.android.unicornpro"
             APP_OUTPUT="unicornpatch.apk"
             APP_MERGED="UnicornPro_Merged.apk"
-            APP_SUPPORTED="1.30.471"
+            APP_SUPPORTED="read from selected MPP (not hard-coded)"
             APP_FILE_TYPE="APK"
             ;;
         dcinside)
@@ -129,7 +145,7 @@ set_app() {
             APP_PACKAGE="com.dcinside.app.android"
             APP_OUTPUT="dcinsidepatch.apk"
             APP_MERGED="dcinside_Merged.apk"
-            APP_SUPPORTED="5.2.15"
+            APP_SUPPORTED="read from selected MPP (not hard-coded)"
             APP_FILE_TYPE="XAPK"
             ;;
         chzzk)
@@ -138,7 +154,7 @@ set_app() {
             APP_PACKAGE="com.navercorp.game.android.community"
             APP_OUTPUT="chzzkpatch.apk"
             APP_MERGED="CHZZK_Merged.apk"
-            APP_SUPPORTED="3.6.2"
+            APP_SUPPORTED="read from selected MPP (not hard-coded)"
             APP_FILE_TYPE="XAPK"
             ;;
         flexcil)
@@ -147,7 +163,7 @@ set_app() {
             APP_PACKAGE="com.flexcil.flexcilnote"
             APP_OUTPUT="flexcilpatch.apk"
             APP_MERGED="Flexcil_Merged.apk"
-            APP_SUPPORTED="1.4.3.30"
+            APP_SUPPORTED="read from selected MPP (not hard-coded)"
             APP_FILE_TYPE="XAPK"
             ;;
         soop)
@@ -156,7 +172,7 @@ set_app() {
             APP_PACKAGE="kr.co.nowcom.mobile.afreeca"
             APP_OUTPUT="sooppatch.apk"
             APP_MERGED="SOOP_Merged.apk"
-            APP_SUPPORTED="8.25.2"
+            APP_SUPPORTED="read from selected MPP (not hard-coded)"
             APP_FILE_TYPE="APK"
             ;;
         *)
@@ -201,18 +217,22 @@ normalize_app_arg() {
 select_app() {
     local app_key
     app_key="$(normalize_app_arg "${1:-}")"
+    if [ -n "${1:-}" ] && [ -z "$app_key" ]; then
+        err "Unknown app: $1"
+        return 1
+    fi
     if [ -n "$app_key" ]; then
         set_app "$app_key"
         return 0
     fi
 
     echo -e "${YELLOW}Select target app:${NC}"
-    echo -e "  ${GREEN}1.${NC} KakaoTalk     (${BLUE}com.kakao.talk${NC}, APKM, supported: 26.5.2)"
-    echo -e "  ${GREEN}2.${NC} Unicorn Pro   (${BLUE}com.unicornsoft.android.unicornpro${NC}, APK, supported: 1.30.471)"
-    echo -e "  ${GREEN}3.${NC} dcinside      (${BLUE}com.dcinside.app.android${NC}, XAPK, supported: 5.2.15)"
-    echo -e "  ${GREEN}4.${NC} CHZZK         (${BLUE}com.navercorp.game.android.community${NC}, XAPK, supported: 3.6.2)"
-    echo -e "  ${GREEN}5.${NC} Flexcil       (${BLUE}com.flexcil.flexcilnote${NC}, XAPK, supported: 1.4.3.30)"
-    echo -e "  ${GREEN}6.${NC} SOOP          (${BLUE}kr.co.nowcom.mobile.afreeca${NC}, APK, supported: 8.25.2)"
+    echo -e "  ${GREEN}1.${NC} KakaoTalk     (${BLUE}com.kakao.talk${NC}, APKM, versions: selected MPP)"
+    echo -e "  ${GREEN}2.${NC} Unicorn Pro   (${BLUE}com.unicornsoft.android.unicornpro${NC}, APK, versions: selected MPP)"
+    echo -e "  ${GREEN}3.${NC} dcinside      (${BLUE}com.dcinside.app.android${NC}, XAPK, versions: selected MPP)"
+    echo -e "  ${GREEN}4.${NC} CHZZK         (${BLUE}com.navercorp.game.android.community${NC}, XAPK, versions: selected MPP)"
+    echo -e "  ${GREEN}5.${NC} Flexcil       (${BLUE}com.flexcil.flexcilnote${NC}, XAPK, versions: selected MPP)"
+    echo -e "  ${GREEN}6.${NC} SOOP          (${BLUE}kr.co.nowcom.mobile.afreeca${NC}, APK, versions: selected MPP)"
     echo ""
     read -r -p "> " selection
 
@@ -236,17 +256,17 @@ check_dependencies() {
         fi
     done
 
-    mkdir -p "$PATCH_SCRIPT_DIR" "$DOWNLOAD_DIR" "$PATCH_SCRIPT_DIR/work"
-
-    if [ ! -f "$EDITOR_JAR" ]; then
-        info "Downloading APKEditor..."
-        curl -L --fail --progress-bar \
-            -o "$EDITOR_JAR" \
-            "https://github.com/REAndroid/APKEditor/releases/download/V1.4.5/APKEditor-1.4.5.jar" || {
-            err "Failed to download APKEditor."
-            missing=1
-        }
+    [ "$missing" -eq 0 ] || return 1
+    # Fail before downloads when Termux still has Java 17 installed.
+    local java_version java_major
+    java_version="$(java -version 2>&1)"
+    java_major="$(printf '%s' "$java_version" | sed -n 's/.*version "\([0-9]*\).*/\1/p' | head -n 1)"
+    if ! [[ "$java_major" =~ ^[0-9]+$ ]] || [ "$java_major" -lt 21 ]; then
+        err "Morphe Desktop needs Java 21+. Termux: pkg install openjdk-21"
+        return 1
     fi
+    mkdir -p "$BASE_DIR" "$PATCH_SCRIPT_DIR" "$DOWNLOAD_DIR" "$PATCH_SCRIPT_DIR/work"
+
 
     ensure_morphe_cli || missing=1
 
@@ -255,6 +275,20 @@ check_dependencies() {
     fi
 
     ok "All required tools are ready."
+}
+
+ensure_apkeditor() {
+    [ -f "$EDITOR_JAR" ] && return 0
+    info "Downloading APKEditor 1.4.9 (needed only for split bundles)..."
+    mkdir -p "$(dirname "$EDITOR_JAR")"
+    curl -L --fail --retry 3 --connect-timeout 20 --progress-bar \
+        -o "$EDITOR_JAR.tmp" \
+        "https://github.com/REAndroid/APKEditor/releases/download/V1.4.9/APKEditor-1.4.9.jar" || {
+        err "Failed to download APKEditor."
+        return 1
+    }
+    validate_zip_file "$EDITOR_JAR.tmp" "APKEditor JAR" || return 1
+    mv -f "$EDITOR_JAR.tmp" "$EDITOR_JAR"
 }
 
 select_input_file() {
@@ -315,8 +349,8 @@ fetch_mpp_from_github() {
     info "Fetching release and pre-release information from $GITHUB_REPO..."
 
     local releases_json
-    releases_json="$(curl -fsSL "$GITHUB_API_URL?per_page=50" 2>/dev/null || true)"
-    if [ -z "$releases_json" ] || echo "$releases_json" | jq -e 'type != "array"' >/dev/null 2>&1; then
+    releases_json="$(github_api "$GITHUB_API_URL?per_page=50")" || return 1
+    if ! printf '%s' "$releases_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
         err "GitHub API request failed. Check your network connection."
         return 1
     fi
@@ -325,12 +359,12 @@ fetch_mpp_from_github() {
     while IFS= read -r line; do
         mpp_lines+=("$line")
     done < <(echo "$releases_json" | jq -r '
-        .[] as $rel
+        [.[] | select(.draft == false)] | sort_by(.published_at) | reverse | .[] as $rel
         | $rel.assets[]
         | select(.name | endswith(".mpp"))
         | select((.name | contains("sources") | not) and (.name | contains("javadoc") | not))
         | "\(.browser_download_url)\t[\(if $rel.prerelease then "Pre-release" else "Release" end)] \($rel.tag_name) - \(.name)"
-    ' | head -50)
+    ')
 
     if [ "${#mpp_lines[@]}" -eq 0 ]; then
         err "No usable .mpp assets found in GitHub releases."
@@ -363,12 +397,15 @@ fetch_mpp_from_github() {
     local selected_name="${selected_line#*$'\t'}"
 
     info "Downloading MPP: $selected_name"
-    rm -f "$MPP_FILE"
-    curl -L --fail --progress-bar -o "$MPP_FILE" "$selected_url" || {
+    mkdir -p "$(dirname "$MPP_FILE")"
+    curl -L --fail --retry 3 --connect-timeout 20 --progress-bar -o "$MPP_FILE.tmp" "$selected_url" || {
         err "Failed to download MPP."
         return 1
     }
 
+    validate_zip_file "$MPP_FILE.tmp" "MPP" || return 1
+    mv -f "$MPP_FILE.tmp" "$MPP_FILE"
+    printf '%s\n' "$selected_url" > "$MPP_FILE.url"
     ok "MPP ready: $MPP_FILE"
 }
 
@@ -398,7 +435,9 @@ validate_apk_file() {
     local path="$1"
 
     validate_zip_file "$path" "APK" || return 1
-    unzip -l "$path" "AndroidManifest.xml" >/dev/null 2>&1 || {
+    local zip_entries
+    zip_entries="$(unzip -Z1 "$path")" || return 1
+    grep -Fxq "AndroidManifest.xml" <<< "$zip_entries" || {
         err "Converted file is not a valid APK. AndroidManifest.xml was not found: $path"
         return 1
     }
@@ -595,6 +634,7 @@ prepare_target_apk() {
             ok "Plain APK selected. Merge step skipped."
             ;;
         APKM|APKS|XAPK)
+            ensure_apkeditor || return 1
             echo ""
             info "Converting $file_type to a patchable APK..."
             local temp_dir="$PATCH_SCRIPT_DIR/work/${APP_KEY}_extract"
@@ -666,15 +706,21 @@ prepare_keystore() {
         return 0
     fi
 
-    if [ -f "$LOCAL_KEYSTORE_FILE" ]; then
-        cp -f "$LOCAL_KEYSTORE_FILE" "$ORIG_KEYSTORE_FILE"
-        cp -f "$ORIG_KEYSTORE_FILE" "$KEYSTORE_FILE"
-        ok "Using local BKS-V2 signing keystore: $LOCAL_KEYSTORE_FILE"
+    if [ -n "${SIGNING_KEYSTORE:-}" ]; then
+        [ -f "$SIGNING_KEYSTORE" ] || { err "Signing keystore not found: $SIGNING_KEYSTORE"; return 1; }
+        ok "Using explicit signing keystore: $SIGNING_KEYSTORE"
         return 0
     fi
 
     if [ -f "$KEYSTORE_FILE" ]; then
         ok "Using existing signing keystore: $KEYSTORE_FILE"
+        return 0
+    fi
+
+    if [ -f "$LOCAL_KEYSTORE_FILE" ]; then
+        cp -f "$LOCAL_KEYSTORE_FILE" "$ORIG_KEYSTORE_FILE"
+        cp -f "$ORIG_KEYSTORE_FILE" "$KEYSTORE_FILE"
+        ok "Using local BKS-V2 signing keystore: $LOCAL_KEYSTORE_FILE"
         return 0
     fi
 
@@ -750,28 +796,32 @@ def check_java():
     parts = match.group(1).split(".")
     major = int(parts[1]) if parts[0] == "1" else int(parts[0].split("-")[0])
     print(f"[OK] Java detected: {major}")
-    if not (17 <= major < 25):
-        print(f"[ERR] Unsupported Java version: {major}. Use Java 17 through 24.")
+    if major < 21:
+        print(f"[ERR] Unsupported Java version: {major}. Use Java 21 or newer.")
         sys.exit(1)
 
 
 def list_patches(cli_jar, mpp_file):
-    cmd = [
-        "java", "-jar", cli_jar, "list-patches",
-        f"--patches={mpp_file}",
-        "--with-packages",
-        "--with-versions",
-        "--with-options",
-    ]
-    print("[INFO] Loading patch list...")
-    proc = run(cmd, capture_output=True)
-    if proc.returncode != 0:
-        print(f"[ERR] list-patches failed:\n{proc.stderr}")
-        sys.exit(5)
-    return proc.stdout
+    # File output has no logging prefixes (the first Index can be logged as
+    # "INFO: Index: 0"). Also independent of stdout/stderr logging changes.
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="morphe-list-") as temp_dir:
+        output = os.path.join(temp_dir, "patches.txt")
+        cmd = ["java", "-jar", cli_jar, "list-patches",
+               f"--patches={mpp_file}", "--with-packages", "--with-versions",
+               "--with-options", f"--out={output}"]
+        print("[INFO] Loading patch list...")
+        proc = run(cmd, capture_output=True, timeout=180)
+        if proc.returncode != 0:
+            raise RuntimeError(f"list-patches failed:\n{proc.stdout}\n{proc.stderr}")
+        if not os.path.isfile(output):
+            raise RuntimeError("CLI produced no patch list. Check MPP/CLI compatibility.")
+        with open(output, encoding="utf-8") as handle:
+            return handle.read()
 
 
 def split_patch_blocks(text):
+    text = re.sub(r"(?m)^INFO: (?=Index:)", "", text)
     matches = list(re.finditer(r"(?m)^\s*Index:\s*\d+\s*$", text))
     if not matches:
         return [text]
@@ -804,11 +854,16 @@ def parse_patches(text, target_pkg=None, include_universal=False):
             "enabled": None,
             "packages": [],
             "is_universal": False,
+            "versions": {},
+            "raw": block,
         }
 
         index = parse_field(block, "Index")
         if index and index.isdigit():
             entry["index"] = int(index)
+
+        if entry["index"] is None or not entry["name"]:
+            continue
 
         enabled = parse_field(block, "Enabled")
         if enabled:
@@ -825,6 +880,22 @@ def parse_patches(text, target_pkg=None, include_universal=False):
                 if re.fullmatch(r"[A-Za-z0-9_.]+", package) and "." in package:
                     if package not in entry["packages"]:
                         entry["packages"].append(package)
+
+        current_package = None
+        in_versions = False
+        for line in block.splitlines():
+            package_match = re.match(r"\s*Package name:\s*([A-Za-z0-9_.]+)\s*$", line)
+            if package_match:
+                current_package = package_match.group(1)
+                entry["versions"].setdefault(current_package, [])
+                in_versions = False
+            elif line.strip() == "Compatible versions:":
+                in_versions = True
+            elif in_versions and current_package:
+                if line.startswith("\t\t") and line.strip():
+                    entry["versions"][current_package].append(line.strip())
+                elif line.strip():
+                    in_versions = False
 
         entry["is_universal"] = len(entry["packages"]) == 0
         entries.append(entry)
@@ -879,7 +950,7 @@ def interactive_select(entries, app_label):
 
     if result is None:
         print("[INFO] Cancelled.")
-        sys.exit(0)
+        sys.exit(130)
 
     return result
 
@@ -899,21 +970,16 @@ def build_patch_cmd(args, selected):
 
     if args.keystore:
         cmd.extend(["--keystore", args.keystore])
-    if args.keystore_password is not None:
+    if args.keystore and args.keystore_password is not None:
         cmd.extend(["--keystore-password", args.keystore_password])
-    if args.key_alias:
+    if args.keystore and args.key_alias:
         cmd.extend(["--keystore-entry-alias", args.key_alias])
-    if args.key_password is not None:
+    if args.keystore and args.key_password is not None:
         cmd.extend(["--keystore-entry-password", args.key_password])
 
-    cmd.extend(["-o", args.output, args.apk])
+    cmd.extend(["--result-file", args.output + ".result.json",
+                "-t", args.output + ".tmp", "-o", args.output, args.apk])
     return cmd
-
-
-def shell_quote(value):
-    if not value or re.search(r"\s", value):
-        return '"' + value.replace('"', '\\"') + '"'
-    return value
 
 
 def main():
@@ -925,6 +991,7 @@ def main():
     parser.add_argument("--package", required=True)
     parser.add_argument("--app-label", required=True)
     parser.add_argument("--include-universal", action="store_true")
+    parser.add_argument("--list-only", action="store_true")
     parser.add_argument("--keystore", default="")
     parser.add_argument("--keystore-password", default=None)
     parser.add_argument("--key-alias", default="")
@@ -947,24 +1014,55 @@ def main():
         include_universal=args.include_universal,
     )
 
-    print(f"[INFO] Package filter: {args.package} + universal patches")
+    if not any(args.package in entry["packages"] for entry in entries):
+        raise RuntimeError(f"Selected MPP has no app-specific patches for {args.package}. "
+                           "Choose a different release or app. Universal-only patching is stopped.")
+    versions = sorted({version for entry in entries
+                       for version in entry["versions"].get(args.package, [])})
+    print(f"[INFO] Package filter: {args.package}")
+    print("[INFO] Supported versions from selected MPP: " +
+          (", ".join(versions) or "No explicit version restriction listed"))
+    if args.list_only:
+        for entry in entries:
+            print(f"[{entry['index']}] {entry['name']}")
+        return
     selected = interactive_select(entries, args.app_label)
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     cmd = build_patch_cmd(args, selected)
 
-    print("\n[CMD] " + " ".join(shell_quote(item) for item in cmd))
+    display_cmd = list(cmd)
+    for secret_flag in ("--keystore-password", "--keystore-entry-password"):
+        if secret_flag in display_cmd:
+            display_cmd[display_cmd.index(secret_flag) + 1] = "<redacted>"
+    import shlex
+    print("\n[CMD] " + shlex.join(display_cmd))
     print("\n[RUN] Patching...")
-    proc = subprocess.run(cmd)
-    if proc.returncode == 0:
+    log_path = args.output + ".log"
+    print(f"[INFO] Patch log: {log_path}")
+    with open(log_path, "w", encoding="utf-8") as log:
+        with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              text=True, encoding="utf-8", errors="replace") as process:
+            for line in process.stdout:
+                print(line, end="", flush=True)
+                log.write(line)
+                log.flush()
+            returncode = process.wait()
+    if returncode == 0 and os.path.isfile(args.output):
         print(f"[DONE] Patched APK: {args.output}")
     else:
-        print(f"[ERR] Patch failed with exit code {proc.returncode}")
-        sys.exit(proc.returncode)
+        print(f"[ERR] Patch failed (exit={returncode}); see {log_path}")
+        sys.exit(returncode or 1)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        print(f"[ERR] {exc}", file=sys.stderr)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        sys.exit(130)
 PYEOF
 
     echo "$selector"
@@ -977,9 +1075,9 @@ run_patch() {
     echo -e "${GREEN}========================================${NC}"
     echo ""
 
-    ensure_questionary
+    ensure_questionary || return 1
     local selector
-    selector="$(write_patch_selector)"
+    selector="$(write_patch_selector)" || return 1
 
     local work_dir="$PATCH_SCRIPT_DIR/work/$APP_KEY"
     local output_tmp="$work_dir/patched.apk"
@@ -1016,7 +1114,12 @@ run_patch() {
         return 1
     fi
 
+    validate_apk_file "$output_tmp" || return 1
     local final_path="$BASE_DIR/$APP_OUTPUT"
+    if [ -e "$final_path" ]; then
+        cp -p "$final_path" "$final_path.previous"
+        warn "Previous output backed up: $final_path.previous"
+    fi
     mv -f "$output_tmp" "$final_path"
     echo ""
     echo -e "${GREEN}========================================${NC}"
@@ -1032,8 +1135,13 @@ main() {
     echo -e "${GREEN}Package:${NC} $APP_PACKAGE"
     echo ""
 
-    check_dependencies
-    select_input_file || exit 1
+    check_dependencies || exit 1
+    if [ -n "${2:-}" ]; then
+        INPUT_FILE="$2"
+        [ -f "$INPUT_FILE" ] || { err "Input file not found: $INPUT_FILE"; exit 1; }
+    else
+        select_input_file || exit 1
+    fi
     fetch_mpp_from_github || exit 1
     prepare_target_apk || exit 1
     prepare_keystore || exit 1
@@ -1043,4 +1151,6 @@ main() {
     echo -e "${GREEN}All done.${NC}"
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
