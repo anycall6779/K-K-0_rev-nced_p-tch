@@ -23,7 +23,7 @@ Before running the script, you must prepare the following tools and repositories
     cd ~/revanced-build-script
     pip install -r requirements.txt
     ```
-    
+
 4.  **(Optional) Prepare APKEditor**
     The script will try to download `APKEditor-1.4.5.jar` to `/storage/emulated/0/Download` if it's missing. You can also download it manually.
 
@@ -33,7 +33,7 @@ Before running the script, you must prepare the following tools and repositories
     ```bash
     # Go to your preferred directory, e.g., Download
     cd /storage/emulated/0/Download
-    
+
     git clone [https://github.com/anycall6779/K-K-0_rev-nced_p-tch.git](https://github.com/anycall6779/K-K-0_rev-nced_p-tch.git)
     ```
 
