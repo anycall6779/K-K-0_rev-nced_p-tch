@@ -309,15 +309,11 @@ normalize_input_path() {
 list_input_candidates() {
     # os.scandir follows a root directory symlink (find without -H does not).
     # Limit recursion to download folders, not all of shared storage.
-    local apkm_only=0
-    if [ "${APP_KEY:-}" = "kakaotalk" ]; then
-        apkm_only=1
-    fi
-    APKM_ONLY="$apkm_only" python - "$BASE_DIR" "$HOME/storage/downloads" "$HOME/Downloads" "$SCRIPT_DIR" "$PWD" <<'INPUT_PYEOF'
+    python - "$BASE_DIR" "$HOME/storage/downloads" "$HOME/Downloads" "$SCRIPT_DIR" "$PWD" <<'INPUT_PYEOF'
 import os
 import sys
 
-extensions = {".apkm"} if os.environ.get("APKM_ONLY") == "1" else {".apk", ".apkm", ".apks", ".xapk"}
+extensions = {".apk", ".apkm", ".apks", ".xapk"}
 seen_roots, seen_files = set(), set()
 files = []
 for index, root in enumerate(sys.argv[1:]):
@@ -362,11 +358,7 @@ select_input_file() {
     echo -e "${YELLOW}==================================${NC}"
     echo ""
     echo "Target package: $APP_PACKAGE"
-    if [ "$APP_KEY" = "kakaotalk" ]; then
-        echo "File selection list: APKM only (.apkm/.APKM)"
-    else
-        echo "Expected file type: $APP_FILE_TYPE (also accepts APK/APKM/APKS/XAPK)"
-    fi
+    echo "Expected file type: $APP_FILE_TYPE (also accepts APK/APKM/APKS/XAPK)"
     echo "Supported version in this patch set: $APP_SUPPORTED"
     echo ""
 
